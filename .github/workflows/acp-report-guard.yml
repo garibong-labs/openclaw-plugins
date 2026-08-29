@@ -1,0 +1,74 @@
+name: acp-report-guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "acp-report-guard/**"
+      - "marketplace.json"
+      - "scripts/check-marketplace.mjs"
+      - ".github/workflows/acp-report-guard.yml"
+  pull_request:
+    paths:
+      - "acp-report-guard/**"
+      - "marketplace.json"
+      - "scripts/check-marketplace.mjs"
+      - ".github/workflows/acp-report-guard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acp-report-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin:
+    name: plugin (node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node baselines supported by OpenClaw plugin development
+        # (docs/plugins/building-plugins.md, openclaw 2026.7.1-2).
+        node-version: ["22.22.3", "24.15.0", "25.9.0"]
+    defaults:
+      run:
+        working-directory: acp-report-guard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: acp-report-guard/package-lock.json
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify published runtime entry exists
+        run: test -f dist/index.js
+
+  marketplace:
+    name: marketplace manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.15.0"
+
+      - name: Check marketplace manifest
+        run: node scripts/check-marketplace.mjs
