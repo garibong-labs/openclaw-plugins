@@ -1,0 +1,58 @@
+{
+  "id": "acp-report-guard",
+  "name": "ACP Report Guard",
+  "description": "Validates canonical ACP lifecycle reports and cancels malformed ones before delivery.",
+  "version": "0.1.0",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["hook"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enforce": {
+        "type": "boolean",
+        "default": true,
+        "description": "Cancel malformed lifecycle reports and block direct intermediate publication. Set false to classify and log only."
+      },
+      "blockDirectIntermediateToolCalls": {
+        "type": "boolean",
+        "default": true,
+        "description": "Block direct message-tool publication of ACP intermediate reports."
+      },
+      "maxIntermediateChars": {
+        "type": "integer",
+        "minimum": 200,
+        "maximum": 4000,
+        "default": 1400,
+        "description": "Character ceiling for the ten-minute cadence report."
+      },
+      "maxBoundaryReportChars": {
+        "type": "integer",
+        "minimum": 200,
+        "maximum": 4000,
+        "default": 2000,
+        "description": "Character ceiling for start, correction-start, and completion reports."
+      }
+    }
+  },
+  "uiHints": {
+    "enforce": {
+      "label": "Enforce",
+      "help": "Turn off for a live message_sending cancellation smoke before activation."
+    },
+    "blockDirectIntermediateToolCalls": {
+      "label": "Block direct intermediate sends",
+      "advanced": true
+    },
+    "maxIntermediateChars": {
+      "label": "Intermediate character ceiling",
+      "advanced": true
+    },
+    "maxBoundaryReportChars": {
+      "label": "Boundary report character ceiling",
+      "advanced": true
+    }
+  }
+}

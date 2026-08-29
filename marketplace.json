@@ -1,0 +1,12 @@
+{
+  "name": "garibong-labs",
+  "version": "0.1.0",
+  "plugins": [
+    {
+      "name": "openclaw-acp-report-guard",
+      "version": "0.1.0",
+      "description": "Validates canonical ACP lifecycle reports and cancels malformed ones before delivery.",
+      "source": "./acp-report-guard"
+    }
+  ]
+}
