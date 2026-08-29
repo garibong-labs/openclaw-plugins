@@ -38,6 +38,15 @@ npm ci
 npm run check      # typecheck + unit tests + build
 ```
 
+When an OpenClaw install is present locally, `acp-report-guard` can also drive
+its built entry through the installed hook runner. The smoke stages the build in
+a disposable temp directory and installs, enables, and activates nothing:
+
+```bash
+npm run build
+npm run smoke:target-build
+```
+
 To exercise a plugin against a local OpenClaw install without copying it into
 the managed plugin root:
 

@@ -8,10 +8,12 @@ import { evaluateToolCall } from "../src/policy/tool.ts";
 import {
   APPROVAL_EVIDENCE,
   CANONICAL_COMPLETION,
+  CANONICAL_COMPLETION_WITH_SECONDS,
   CANONICAL_CORRECTION_START,
   CANONICAL_INTERMEDIATE,
   CANONICAL_START,
   ORDINARY_CHAT,
+  completionWithDuration,
   replaceLine,
 } from "./fixtures.ts";
 
@@ -41,10 +43,23 @@ describe("evaluateOutboundContent", () => {
       CANONICAL_CORRECTION_START,
       CANONICAL_INTERMEDIATE,
       CANONICAL_COMPLETION,
+      CANONICAL_COMPLETION_WITH_SECONDS,
     ]) {
       const decision = evaluateOutboundContent(report, DEFAULT_GUARD_CONFIG);
       assert.equal(decision.action, "pass");
     }
+  });
+
+  it("cancels a completion report whose seconds exceed 59", () => {
+    const decision = evaluateOutboundContent(
+      completionWithDuration("17분 60초"),
+      DEFAULT_GUARD_CONFIG,
+    );
+    assert.deepEqual(decision, {
+      action: "cancel",
+      kind: "completion",
+      reasonCode: ReasonCodes.CompletionDurationDrift,
+    });
   });
 
   it("cancels a malformed intermediate report", () => {

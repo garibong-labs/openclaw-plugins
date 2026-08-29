@@ -18,6 +18,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts",
+    "smoke:target-build": "node test/smoke/target-build-message-sending.ts",
     "check": "npm run typecheck && npm run test && npm run build",
     "prepack": "npm run build"
   },

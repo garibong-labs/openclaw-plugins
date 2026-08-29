@@ -16,10 +16,12 @@ import {
 } from "../src/lifecycle/validate.ts";
 import {
   CANONICAL_COMPLETION,
+  CANONICAL_COMPLETION_WITH_SECONDS,
   CANONICAL_CORRECTION_START,
   CANONICAL_INTERMEDIATE,
   CANONICAL_INTERMEDIATE_WITH_ISSUE,
   CANONICAL_START,
+  completionWithDuration,
   insertLine,
   removeLine,
   replaceLine,
@@ -85,6 +87,10 @@ describe("valid canonical layouts", () => {
 
   it("accepts the canonical completion report", () => {
     expectValid(CANONICAL_COMPLETION);
+  });
+
+  it("accepts a completion report in the minute-plus-seconds form", () => {
+    expectValid(CANONICAL_COMPLETION_WITH_SECONDS);
   });
 
   it("accepts reports whose emoji omit the variation selector", () => {
@@ -360,6 +366,42 @@ describe("completion drift", () => {
     );
     expectRejected(padded, ReasonCodes.Oversized);
   });
+});
+
+describe("completion duration grammar", () => {
+  // Production emits both the minute-only and the minute-plus-seconds form;
+  // rejecting the latter cancelled valid completion reports.
+  const accepted = ["17분 31초", "42분", "0분", "0분 0초", "7분 09초", "128분 59초"];
+
+  for (const duration of accepted) {
+    it(`accepts \`${duration}\``, () => {
+      expectValid(completionWithDuration(duration));
+    });
+  }
+
+  const rejected = [
+    // Seconds are bounded to 0-59.
+    "17분 60초",
+    "17분 90초",
+    "17분 031초",
+    // The unit, the separating space, and the segment order are all fixed.
+    "17분 31",
+    "17분31초",
+    "17 분 31초",
+    "31초",
+    "17분 31초 05초",
+    "17분 31분",
+    "-17분 31초",
+  ];
+
+  for (const duration of rejected) {
+    it(`rejects \`${duration}\``, () => {
+      expectRejected(
+        completionWithDuration(duration),
+        ReasonCodes.CompletionDurationDrift,
+      );
+    });
+  }
 });
 
 describe("reason code hygiene", () => {

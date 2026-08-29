@@ -4,6 +4,26 @@ All notable changes to `openclaw-acp-report-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Completion reports using the minute-plus-seconds elapsed form (`17분 31초`)
+  were cancelled with `acp_report_guard.completion.duration_drift`. The
+  completion duration grammar now accepts both the minute-only and the
+  minute-plus-seconds form, with seconds bounded to `0`-`59`. Malformed
+  durations (`17분 60초`, `17분 31`, `17분31초`) still fail, and the metadata
+  line and round grammar are unchanged.
+
+### Added
+
+- `npm run smoke:target-build`: a disposable target-build smoke that drives the
+  built plugin through the installed OpenClaw hook runner and asserts
+  `message_sending` registration, a passing completion with seconds, a cancelled
+  malformed report, passing ordinary chat, and no raw outbound content in logs,
+  the cancel reason, or hook metadata. It does not install, enable, or activate
+  the plugin, does not touch OpenClaw config, and does not contact Gateway.
+
 ## [0.1.0] - 2026-08-29
 
 Initial release.

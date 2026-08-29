@@ -25,6 +25,17 @@ export type CompiledLineSpec = {
 
 const TIME_SUFFIX = "([01][0-9]|2[0-3]):[0-5][0-9] KST";
 
+/**
+ * Completion elapsed duration: `<n>분`, optionally followed by `<s>초`.
+ *
+ * Both forms are canonical - a completion report emits the minute-only form
+ * for a whole-minute run and the minute-plus-seconds form otherwise
+ * (`17분 31초`). Seconds are bounded to 0-59 so an unnormalized value such as
+ * `17분 90초` stays duration drift, as does a missing unit, a missing
+ * separating space, or a repeated segment.
+ */
+const COMPLETION_DURATION_SOURCE = "[0-9]+분(?: [0-5]?[0-9]초)?";
+
 /** Exactly one top-level bullet with visible text; nested bullets are drift. */
 const BULLET_SOURCE = "^- \\S.*$";
 
@@ -154,7 +165,7 @@ export const COMPLETION_LAYOUT: readonly LineSpec[] = [
   ACP_TARGET_LINE,
   {
     kind: "pattern",
-    source: "^⏱ \\*\\*ACP 소요\\*\\*: [0-9]+분 · 라운드 [1-9][0-9]*$",
+    source: `^⏱ \\*\\*ACP 소요\\*\\*: ${COMPLETION_DURATION_SOURCE} · 라운드 [1-9][0-9]*$`,
     code: ReasonCodes.CompletionDurationDrift,
   },
   blank(),

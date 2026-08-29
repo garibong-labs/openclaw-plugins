@@ -115,3 +115,19 @@ export function insertLine(
   lines.splice(index, 0, inserted);
   return lines.join("\n");
 }
+
+/** Index of the `⏱ **ACP 소요**` line inside a completion report. */
+export const COMPLETION_DURATION_LINE_INDEX = 4;
+
+/** Completion report whose elapsed duration uses `duration` verbatim. */
+export function completionWithDuration(duration: string): string {
+  return replaceLine(
+    CANONICAL_COMPLETION,
+    COMPLETION_DURATION_LINE_INDEX,
+    `⏱️ **ACP 소요**: ${duration} · 라운드 1`,
+  );
+}
+
+/** Completion report in the minute-plus-seconds form production emits. */
+export const CANONICAL_COMPLETION_WITH_SECONDS =
+  completionWithDuration("17분 31초");

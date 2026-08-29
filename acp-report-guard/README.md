@@ -34,6 +34,9 @@ The guard rejects:
   inline code;
 - the early legacy elapsed-only line (`⏱ **ACP 시간**: 20분`) instead of the
   current total / current-stage / last-change form;
+- completion durations outside the canonical `<n>분` and `<n>분 <s>초` forms -
+  both are valid, but seconds are bounded to `0`-`59`, so `17분 60초`,
+  `17분 31`, and `17분31초` are drift;
 - section renames, reordering, extra sections, nested bullets, and extra or
   missing bullets;
 - blank-line drift and leading/trailing structural noise;
@@ -105,18 +108,22 @@ safeguard and `before_tool_call` only as defense in depth.
 Hook availability and cancellation semantics are host-version dependent. Before
 switching this plugin on operationally:
 
-1. install and enable it on the target OpenClaw build (an explicit operator
+1. run `npm run smoke:target-build` (see below) to confirm the built entry
+   registers `message_sending` and cancels as expected against the OpenClaw
+   build installed on this machine;
+2. install and enable it on the target OpenClaw build (an explicit operator
    action, deliberately not automated by this repository);
-2. run it with `enforce: false` first and confirm the expected
+3. run it with `enforce: false` first and confirm the expected
    `outcome=observed` log lines appear for a deliberately malformed synthetic
    report;
-3. run a **live `message_sending` cancellation smoke** on that build: send a
+4. run a **live `message_sending` cancellation smoke** on that build: send a
    synthetic malformed lifecycle report through a real outbound path and
    confirm the delivery is actually suppressed, not merely logged;
-4. only then enable enforcement.
+5. only then enable enforcement.
 
 Do not infer live cancellation behavior from unit tests. The unit tests prove
-the policy; only the smoke proves the host wiring.
+the policy; the target-build smoke proves the registration and dispatch wiring;
+only the live smoke proves end-to-end delivery suppression on a running host.
 
 ## Observability and privacy
 
@@ -142,6 +149,30 @@ npm run build
 npm run check   # all of the above
 ```
 
+### Target-build smoke
+
+```bash
+npm run build
+npm run smoke:target-build
+```
+
+`npm test` exercises the pure policy functions. The target-build smoke exercises
+the **built** plugin through the **installed** OpenClaw hook runner, and proves
+what a pure-function test cannot: that `dist/index.js` loads against the real
+plugin SDK, that its `register` puts a `message_sending` handler into the
+registry, that the global runner dispatches to it, that a valid completion
+carrying seconds passes, that a malformed report is cancelled with the expected
+reason code, that ordinary chat passes, and that no raw outbound content reaches
+a log line, the cancel reason, or the hook metadata.
+
+It is non-invasive: it copies `dist` into a private temp directory, links that
+directory's `node_modules/openclaw` at the installed package, redirects
+`OPENCLAW_HOME` into the same directory, and removes everything on exit. It
+never installs, enables, or activates the plugin, never reads or writes OpenClaw
+config, and never contacts Gateway. It needs OpenClaw present locally, so it is
+not part of `npm run check` or CI; set `OPENCLAW_SMOKE_PACKAGE_ROOT` if OpenClaw
+is not installed globally.
+
 The OpenClaw host is an **optional peer dependency**, so the test and typecheck
 lanes do not download it. `src/host-contract.ts` mirrors the hook types this
 plugin consumes from `openclaw@2026.7.1-2`, and
@@ -165,6 +196,7 @@ src/
   lifecycle/normalize.ts   transport-level normalization
   lifecycle/reason-codes.ts stable reason codes
 test/                      unit tests (node --test)
+  smoke/                   target-build smoke against the installed host
 ```
 
 ## License

@@ -54,6 +54,11 @@ Runtime code follows the same rule:
 - New guard behavior needs tests for all four axes: the valid canonical case,
   the malformed case, the "must not touch this" bypass case, and the
   observability case (hook return shape plus a no-raw-content log assertion).
+- Unit tests prove the pure policy, not the host wiring. Behavior that depends
+  on hook registration or dispatch also needs a target-build smoke that drives
+  the built entry through the installed OpenClaw hook runner from a disposable
+  temp directory. Such a smoke stays out of `npm run check` and CI, because it
+  requires a local OpenClaw install.
 
 ## Boundaries for automated agents
 
