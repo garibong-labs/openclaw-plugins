@@ -11,11 +11,16 @@ plugin is versioned independently of the repository and follows
 - **Owner-checkpoint delivery-receipt guard** on `before_agent_run`,
   `message_sent`, `before_agent_finalize`, and `agent_end`. A run is tracked
   only when trusted scheduler provenance (hook context `trigger` exactly
-  `cron` plus a cron job id and the host's bounded correlation fields)
-  coincides with the exact first-line prompt marker
-  `[owner-progress-checkpoint:v1]`; the marker alone is never authority, and
-  interactive turns, non-cron runs, and uncorrelatable or ambiguous runs stay
-  untouched. A publication receipt requires a successful send with a
+  `cron` and the host's bounded correlation fields) coincides with the exact
+  first-line prompt marker `[owner-progress-checkpoint:v1]`; the marker alone
+  is never authority, and interactive turns, non-cron runs, and
+  uncorrelatable or ambiguous runs stay untouched. Eligibility deliberately
+  does **not** require a cron `jobId`: the installed `openclaw@2026.7.1-2`
+  embedded cron runner receives `jobId` in `runEmbeddedAgent` but omits it
+  from the `before_agent_run` hook context it assembles (only the CLI-runner
+  path exposes it), so a job-id requirement would misclassify every real
+  embedded owner checkpoint as ineligible. `jobId` is accepted as an optional
+  context field, never read for decisions and never logged. A publication receipt requires a successful send with a
   non-empty message id, matching run/session correlation, and delivery to the
   exact original owner conversation derived from trusted hook context (a
   failed send followed by an exact-target success passes; a wrong-target
@@ -38,18 +43,24 @@ plugin is versioned independently of the repository and follows
   ordinary, uncorrelatable, ambiguous, and internal-error (fail-open) alike -
   and never signals "no opinion" with `void`. The exported host type
   (`PluginHookBeforeAgentRunResult`) allows `void`, but the installed
-  `openclaw@2026.7.1-2` runner's `runBeforeAgentRun` merge normalizes a
-  nullish handler result into a block
-  (`before_agent_run returned an invalid decision`); runtime behavior is
-  authoritative, and a handler relying on `void` could block every agent run.
+  `openclaw@2026.7.1-2` runner's `runBeforeAgentRun` merge blocks a `null`
+  handler result outright (`before_agent_run returned an invalid decision`),
+  and an `undefined` result escapes the same normalization only through an
+  incidental `!== undefined` guard in the generic merge layer; runtime
+  behavior is authoritative, and a handler relying on `void` is one host
+  refactor away from blocking every agent run.
 - Target-build smoke coverage driving the built plugin through the installed
   hook runner and the installed harness finalize helper for all four receipt
   hooks: registration, correlation, receipt acceptance, enforce-mode revise,
-  cleanup, ordinary-turn bypass, and no-raw-content logging. The smoke also
-  pins the installed gate's nullish normalization with a synthetic probe
-  (`null` blocks; `undefined` survives only an incidental guard in the
-  generic merge layer) and asserts every `before_agent_run` scenario yields
-  an explicit pass decision from the installed runner.
+  cleanup, ordinary-turn bypass, and no-raw-content logging. Every eligible
+  synthetic cron context omits `jobId` to mirror the installed embedded cron
+  path, and a source-contract probe scans the installed dist for the embedded
+  runner chunk and fails if its `before_agent_run` hook context starts (or
+  stops) omitting `jobId`. The smoke also pins the installed gate's nullish
+  normalization with a synthetic probe (`null` blocks; `undefined` survives
+  only an incidental guard in the generic merge layer) and asserts every
+  `before_agent_run` scenario yields an explicit pass decision from the
+  installed runner.
 
 ### Notes
 

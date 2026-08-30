@@ -99,10 +99,20 @@ gap.
 **Eligibility (`before_agent_run`).** A run is tracked only when *both* hold:
 
 - trusted scheduler provenance from the hook context - `trigger` exactly
-  `cron` plus a cron job id - and the bounded correlation fields the host
-  exposes there (session key, channel, conversation target id); and
+  `cron` - and the bounded correlation fields the host exposes there
+  (session key, channel, conversation target id); and
 - the checkpoint prompt's **first line** is exactly the public marker
   `[owner-progress-checkpoint:v1]`.
+
+Eligibility deliberately does **not** require a cron `jobId`. The host type
+declares the field, but on the installed `openclaw@2026.7.1-2` embedded cron
+path the executor passes `jobId` into `runEmbeddedAgent` and the
+`before_agent_run` hook context assembled inside the embedded runner omits
+it - only the CLI-runner path exposes it. Requiring a job id would therefore
+misclassify every real embedded owner checkpoint as ineligible. `jobId` is
+accepted as an optional context field that is never read for decisions and
+never logged; the target-build smoke pins the installed omission with a
+source-contract probe.
 
 The marker alone is never authority: an interactive turn, arbitrary user text
 carrying the marker, a non-cron run, or a run whose context lacks the
@@ -113,13 +123,14 @@ from tracking (fail open) rather than guessed at.
 Whatever the classification - eligible, ordinary, uncorrelatable, ambiguous,
 or an internal guard defect - the handler returns the host's explicit
 `{ outcome: "pass" }` gate decision, never `void`. The exported host type
-(`PluginHookBeforeAgentRunResult`) allows `void`, but the installed build's
-`runBeforeAgentRun` normalizes a nullish handler result into a block
-(`before_agent_run returned an invalid decision`), so a `void`-returning
-handler is one host refactor away from blocking every run it observes. The
-target-build smoke pins that runner behavior with a synthetic probe and
-asserts every scenario yields an explicit pass decision from the installed
-runner.
+(`PluginHookBeforeAgentRunResult`) allows `void`, but on the installed build
+`runBeforeAgentRun` blocks a `null` handler result outright
+(`before_agent_run returned an invalid decision`), and an `undefined` result
+avoids the same normalization only through an incidental `!== undefined`
+guard in the generic hook-merge layer - so a `void`-returning handler is one
+host refactor away from blocking every run it observes. The target-build
+smoke pins both behaviors with synthetic probes and asserts every scenario
+yields an explicit pass decision from the installed runner.
 
 **Receipt (`message_sent`).** A publication receipt is counted only when the
 send succeeded, carries a non-empty message id, correlates to the tracked run

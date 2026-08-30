@@ -28,13 +28,21 @@
  *    into plain continuation (proving the host fails open there - the guard
  *    logs the exhaustion instead of claiming delivery), cleanup on
  *    `agent_end` is deterministic, and ordinary turns bypass everything.
+ *    Every eligible synthetic cron context deliberately omits `jobId`,
+ *    mirroring the authoritative installed embedded cron path, where the
+ *    executor passes `jobId` into `runEmbeddedAgent` but the assembled
+ *    `before_agent_run` hook context omits it. A source-contract probe scans
+ *    the installed dist for the embedded runner chunk and fails if that
+ *    context starts (or stops) omitting `jobId`.
  * 7. `before_agent_run` is an input gate on this host: `runBeforeAgentRun`
- *    normalizes a nullish handler result to a block (`before_agent_run
- *    returned an invalid decision`). A synthetic probe pins that behavior on
- *    the installed build, and every receipt scenario - eligible, ordinary
- *    marker-only, and uncorrelatable - is asserted to produce an explicit
- *    pass decision from the installed runner, so a regression back to a
- *    `void` return cannot escape this smoke again.
+ *    normalizes a `null` handler result to a block (`before_agent_run
+ *    returned an invalid decision`), while an `undefined` result is skipped
+ *    only by an incidental `!== undefined` guard in the generic merge layer.
+ *    A synthetic probe pins both behaviors on the installed build, and every
+ *    receipt scenario - eligible, ordinary marker-only, and uncorrelatable -
+ *    is asserted to produce an explicit pass decision from the installed
+ *    runner, so a regression back to a `void` return cannot escape this
+ *    smoke again.
  * 8. No raw outbound content, prompt text, command text, agent id, or
  *    correlation identifier reaches a log line, the cancel reason, the block
  *    reason, a revise reason, or the hook metadata.
@@ -56,6 +64,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -96,14 +105,21 @@ const UNAUTHORIZED_AGENT_ID = "smoke-helper-agent";
 const SMOKE_CHANNEL = "smoke-messenger";
 const SMOKE_CONVERSATION = "smoke-conversation-1";
 const SMOKE_WRONG_CONVERSATION = "smoke-conversation-2";
-const SMOKE_JOB_ID = "smoke-cron-job-1";
 const SMOKE_MESSAGE_ID = "smoke-message-1";
 
-/** One trusted cron agent-hook context per receipt scenario. */
+/**
+ * One trusted cron agent-hook context per receipt scenario.
+ *
+ * Deliberately no `jobId`: this mirrors the authoritative installed embedded
+ * cron path (`openclaw@2026.7.1-2`), where the cron executor passes
+ * `jobId: params.job.id` into `runEmbeddedAgent` but the `hookCtx` the
+ * embedded runner assembles for `before_agent_run` omits it. Eligibility
+ * (and everything downstream: receipt, revise, cleanup) must be proven on
+ * exactly this shape; `probeEmbeddedHookContextContract` pins it.
+ */
 function cronRunContext(scenario: string): Record<string, unknown> {
   return {
     trigger: "cron",
-    jobId: SMOKE_JOB_ID,
     runId: `smoke-run-${scenario}`,
     sessionKey: `smoke-session-${scenario}`,
     sessionId: `smoke-session-id-${scenario}`,
@@ -152,6 +168,94 @@ function resolveOpenClawRoot(): string {
     "`npm root -g` failed; set OPENCLAW_SMOKE_PACKAGE_ROOT to the installed openclaw package",
   );
   return path.join(npmRoot.stdout.trim(), "openclaw");
+}
+
+/**
+ * Source-contract probe: pin the `before_agent_run` hook-context shape
+ * assembled by the installed *embedded* agent runner.
+ *
+ * Receipt eligibility deliberately does not require `jobId`: on the installed
+ * embedded cron path (`openclaw@2026.7.1-2`, chunk `dist/selection-*.js` at
+ * the time of inspection) the cron executor passes `jobId: params.job.id`
+ * into `runEmbeddedAgent`, but the `hookCtx` literal the embedded runner
+ * builds and passes to `runBeforeAgentRun` omits it. Only the CLI-runner
+ * path (which passes `buildAgentHookContext(...)` instead of a local
+ * `hookCtx`) exposes `jobId` to this hook.
+ *
+ * The probe scans the installed dist text - no private chunk imports, so
+ * hashed chunk names do not matter - for the one chunk that both assembles a
+ * `const hookCtx = {...}` literal and passes that variable directly to
+ * `runBeforeAgentRun`, then asserts the literal still omits `jobId`. If
+ * OpenClaw starts exposing `jobId` there, stops omitting it, or refactors
+ * the call so the probe no longer finds exactly one site, the smoke fails
+ * loudly and the pinned contract must be re-verified by hand.
+ */
+function probeEmbeddedHookContextContract(openclawRoot: string): void {
+  const distDir = path.join(openclawRoot, "dist");
+  const matches: Array<{ file: string; literal: string }> = [];
+  for (const name of readdirSync(distDir)) {
+    if (!name.endsWith(".js")) {
+      continue;
+    }
+    const source = readFileSync(path.join(distDir, name), "utf8");
+    const compact = source.replace(/\s+/gu, "");
+    // The embedded runner's call site is `runBeforeAgentRun({...}, hookCtx)`
+    // with a flat event literal; the CLI runner and the hook-runner
+    // definition itself do not match this shape.
+    if (!/runBeforeAgentRun\(\{[^{}]*\},hookCtx\)/u.test(compact)) {
+      continue;
+    }
+    const declaration = "const hookCtx = {";
+    assert.equal(
+      source.split(declaration).length - 1,
+      1,
+      `${name}: expected exactly one hookCtx declaration in the embedded runner chunk; the installed contract moved - re-verify jobId exposure by hand`,
+    );
+    const start = source.indexOf(declaration);
+    let depth = 0;
+    let end = -1;
+    for (let i = start + declaration.length - 1; i < source.length; i += 1) {
+      const char = source[i];
+      if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    assert.notEqual(end, -1, `${name}: unterminated hookCtx literal`);
+    matches.push({ file: name, literal: source.slice(start, end + 1) });
+  }
+
+  assert.equal(
+    matches.length,
+    1,
+    `expected exactly one installed chunk assembling hookCtx for runBeforeAgentRun, found ${matches.length}` +
+      `${matches.length > 0 ? ` (${matches.map((m) => m.file).join(", ")})` : ""}; ` +
+      "the installed embedded hook-context contract moved - re-verify jobId exposure by hand",
+  );
+  const match = matches[0];
+  assert.ok(match !== undefined, "unreachable: exactly one match asserted above");
+  const { file, literal } = match;
+  const compactLiteral = literal.replace(/\s+/gu, "");
+  assert.ok(
+    compactLiteral.includes("trigger:params.trigger") &&
+      compactLiteral.includes("buildAgentHookContextChannelFields"),
+    `${file}: matched hookCtx literal no longer carries the expected trigger/channel fields; re-verify the embedded hook-context contract by hand`,
+  );
+  assert.equal(
+    /\bjobId\b/u.test(literal),
+    false,
+    `${file}: the installed embedded before_agent_run hook context now exposes jobId. ` +
+      "Eligibility stays trigger-plus-marker either way, but re-verify the contract " +
+      "and update this probe, src/host-contract.ts, and the receipt docs together.",
+  );
+  record(
+    `installed embedded runner (${file}) still omits jobId from the before_agent_run hook context - jobId-free eligibility matches the installed contract`,
+  );
 }
 
 /**
@@ -206,7 +310,6 @@ function contentNeedles(): readonly string[] {
     SMOKE_CHANNEL,
     SMOKE_CONVERSATION,
     SMOKE_WRONG_CONVERSATION,
-    SMOKE_JOB_ID,
     SMOKE_MESSAGE_ID,
   );
   for (const scenario of ["happy", "revise", "budget", "wrong", "cleanup"]) {
@@ -230,6 +333,8 @@ async function main(): Promise<void> {
   process.stdout.write(
     `openclaw ${openclawVersion} (${HOOK_NAME} + ${TOOL_HOOK_NAME} runner)\n`,
   );
+
+  probeEmbeddedHookContextContract(openclawRoot);
 
   const { workspace, entryUrl } = stageTargetBuild(openclawRoot);
 

@@ -24,6 +24,7 @@ import {
   CHECKPOINT_REPORT_TERMINAL_FAILURE,
   CHECKPOINT_REPORT_TERMINAL_GREEN,
   CHECKPOINT_RUN_CONTEXT,
+  CHECKPOINT_RUN_CONTEXT_WITH_JOB_ID,
   CHECKPOINT_SEND_CONTEXT,
   OWNER_CHECKPOINT_PROMPT,
   WRONG_TARGET_SEND_CONTEXT,
@@ -143,13 +144,46 @@ describe("tracker eligibility", () => {
     assert.equal(tracker.size, 1);
   });
 
+  it("registers the installed embedded shape, which carries no jobId", () => {
+    // The authoritative installed before_agent_run context on the embedded
+    // cron path omits jobId, so eligibility must hold without it - and the
+    // resulting entry must be fully receipt-enforced, not just tracked.
+    const tracker = new CheckpointReceiptTracker();
+    assert.equal("jobId" in CHECKPOINT_RUN_CONTEXT, false);
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT).kind,
+      "registered",
+    );
+    assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "revise");
+    assert.equal(
+      tracker.recordSend(successfulSend(CHECKPOINT_SEND_CONTEXT)).kind,
+      "receipt",
+    );
+    assert.equal(
+      tracker.finalize(FINALIZE_KEY, "enforce").kind,
+      "receipt_confirmed",
+    );
+  });
+
+  it("treats a present jobId as inert (CLI-runner cron shape)", () => {
+    const tracker = new CheckpointReceiptTracker();
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT_WITH_JOB_ID)
+        .kind,
+      "registered",
+    );
+    assert.equal(tracker.size, 1);
+    assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "revise");
+  });
+
   it("ignores the marker from an unrelated non-cron turn", () => {
     const tracker = new CheckpointReceiptTracker();
     for (const ctx of [
       { ...CHECKPOINT_RUN_CONTEXT, trigger: undefined },
       { ...CHECKPOINT_RUN_CONTEXT, trigger: "user" },
       { ...CHECKPOINT_RUN_CONTEXT, trigger: "manual" },
-      { ...CHECKPOINT_RUN_CONTEXT, jobId: undefined },
+      // A jobId without cron provenance never opts a run in either.
+      { ...CHECKPOINT_RUN_CONTEXT_WITH_JOB_ID, trigger: "user" },
     ]) {
       assert.equal(
         tracker.register(OWNER_CHECKPOINT_PROMPT, ctx).kind,
@@ -593,9 +627,10 @@ describe("receipt hook handlers", () => {
   });
 
   it("returns an explicit pass even when the tracker itself is defective", () => {
-    // The host runs before_agent_run fail-closed and normalizes a nullish
-    // result to a block, so the internal-error path must still produce the
-    // explicit pass decision - fail open means pass, not void.
+    // The host runs before_agent_run fail-closed: a null result is blocked
+    // outright and undefined is skipped only by an incidental merge-layer
+    // guard, so the internal-error path must still produce the explicit pass
+    // decision - fail open means pass, not void.
     const throwingTracker = new (class extends CheckpointReceiptTracker {
       override register(): never {
         throw new Error("synthetic tracker defect");

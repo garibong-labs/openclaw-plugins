@@ -79,6 +79,13 @@ export type ToolHookContext = {
 /** Mirrors `PluginHookAgentContext` (the fields this plugin reads). */
 export type AgentHookContext = {
   runId?: string;
+  /**
+   * Declared by the host type, but populated inconsistently at runtime on
+   * `openclaw@2026.7.1-2`: the CLI-runner cron path includes it, while the
+   * embedded cron runner passes `jobId` into `runEmbeddedAgent` and then
+   * omits it from the `before_agent_run` hook context it assembles. Never
+   * rely on it for eligibility or correlation.
+   */
   jobId?: string;
   agentId?: string;
   sessionKey?: string;
@@ -130,7 +137,7 @@ export type BeforeAgentRunPassDecision = Extract<
  *
  * The exported host type allows `void`, but runtime behavior is authoritative
  * for the pinned build: `runBeforeAgentRun` merges handler results with
- * `mergeNullResults: true` and normalizes a nullish result to
+ * `mergeNullResults: true` and its merge normalizes a `null` result to
  * `{ outcome: "block", reason: "before_agent_run returned an invalid
  * decision" }`. On `openclaw@2026.7.1-2` a `null` result blocks the run
  * outright, and an `undefined` result avoids that only through an incidental

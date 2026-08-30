@@ -11,10 +11,15 @@
  * This module closes that gap with a narrow completeness check:
  *
  * - `before_agent_run` registers an *eligible* checkpoint only when trusted
- *   scheduler provenance (hook context `trigger === "cron"` plus a cron job
- *   id) coincides with the exact first-line marker in the checkpoint prompt.
- *   The marker alone is never authority; the provenance alone never opts a
- *   run in.
+ *   scheduler provenance (hook context `trigger === "cron"`) coincides with
+ *   the exact first-line marker in the checkpoint prompt. The marker alone is
+ *   never authority; the provenance alone never opts a run in. Eligibility
+ *   deliberately does not require a cron `jobId`: the installed embedded cron
+ *   runner (`openclaw@2026.7.1-2`) receives `jobId` in `runEmbeddedAgent`
+ *   but omits it from the `before_agent_run` hook context it assembles, so a
+ *   `jobId` requirement would misclassify every real embedded checkpoint as
+ *   ineligible. Only the CLI-runner path exposes `jobId` here; it is treated
+ *   as an optional field that is never read for decisions and never logged.
  * - `message_sent` counts a publication receipt only for a successful send
  *   with a message id whose correlation and destination match the eligible
  *   run exactly. The destination is derived from the trusted hook context at
@@ -135,6 +140,13 @@ export type FinalizeOutcome =
 /** Subset of the agent hook context this policy reads. */
 export type CheckpointRunContext = {
   trigger?: string | undefined;
+  /**
+   * Declared by the host's `PluginHookAgentContext` but populated
+   * inconsistently: the CLI-runner cron path exposes it, while the installed
+   * embedded cron runner omits it from the `before_agent_run` context.
+   * Accepted for shape compatibility only - never required for eligibility,
+   * never read for decisions, never logged.
+   */
   jobId?: string | undefined;
   runId?: string | undefined;
   sessionKey?: string | undefined;
@@ -243,16 +255,17 @@ export class CheckpointReceiptTracker {
   /**
    * Evaluate one `before_agent_run` and track the run when it is an eligible
    * owner checkpoint. Eligibility requires *both* trusted scheduler
-   * provenance (`trigger === "cron"` plus a job id) and the exact first-line
-   * marker; a run carrying only one of the two is not eligible and stays
-   * untouched. A marker-and-provenance run whose context lacks the session
-   * key or destination fields cannot be correlated and also stays untouched.
+   * provenance (`trigger === "cron"`) and the exact first-line marker; a run
+   * carrying only one of the two is not eligible and stays untouched. A cron
+   * `jobId` is deliberately not required (the installed embedded cron runner
+   * omits it from this hook's context; see the module header). A
+   * marker-and-provenance run whose context lacks the session key or
+   * destination fields cannot be correlated and also stays untouched.
    */
   register(prompt: unknown, ctx: CheckpointRunContext): RegisterOutcome {
     this.prune();
     if (
       nonBlank(ctx.trigger) !== TRUSTED_SCHEDULER_TRIGGER ||
-      nonBlank(ctx.jobId) === undefined ||
       !promptCarriesCheckpointMarker(prompt)
     ) {
       return { kind: "not_eligible" };

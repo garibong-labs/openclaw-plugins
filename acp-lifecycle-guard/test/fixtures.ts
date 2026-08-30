@@ -173,14 +173,30 @@ export const CHECKPOINT_REPORT_BLOCKED =
 export const CHECKPOINT_REPORT_ACTIVE =
   "🔄 예시 점검 보고: 작업 진행 중, 절반 완료.";
 
-/** Trusted scheduler hook context for an eligible synthetic checkpoint run. */
+/**
+ * Trusted scheduler hook context for an eligible synthetic checkpoint run.
+ *
+ * Deliberately carries no `jobId`: this mirrors the authoritative installed
+ * shape (`openclaw@2026.7.1-2` embedded cron path), where the executor passes
+ * `jobId` into `runEmbeddedAgent` but the `before_agent_run` hook context
+ * assembled inside the embedded runner omits it. Eligibility must therefore
+ * hold without a job id.
+ */
 export const CHECKPOINT_RUN_CONTEXT = {
   trigger: "cron",
-  jobId: "example-cron-job-1",
   runId: "example-run-1",
   sessionKey: "example-session-key-1",
   channel: "example-messenger",
   channelId: "example-conversation-1",
+} as const;
+
+/**
+ * The same eligible run as seen on the CLI-runner cron path, which does
+ * expose `jobId`. Presence of the optional field must not change any outcome.
+ */
+export const CHECKPOINT_RUN_CONTEXT_WITH_JOB_ID = {
+  ...CHECKPOINT_RUN_CONTEXT,
+  jobId: "example-cron-job-1",
 } as const;
 
 /** The exact-destination delivery context the run above must publish to. */

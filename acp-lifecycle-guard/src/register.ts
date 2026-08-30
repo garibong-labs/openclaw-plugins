@@ -193,9 +193,11 @@ export function createBeforeToolCallHandler(
 export type ReceiptHookHandlers = {
   /**
    * Always returns the explicit pass decision: the installed runner's
-   * `runBeforeAgentRun` normalizes a nullish handler result to a block
-   * (`before_agent_run returned an invalid decision`), so a `void` return is
-   * not a safe way to say "not my run" on this host.
+   * `runBeforeAgentRun` normalizes a `null` handler result to a block
+   * (`before_agent_run returned an invalid decision`), and an `undefined`
+   * result escapes the same fate only through an incidental `!== undefined`
+   * guard in the generic merge layer, so a `void` return is not a safe way
+   * to say "not my run" on this host.
    */
   beforeAgentRun: (
     event: BeforeAgentRunEvent,
@@ -216,10 +218,12 @@ export type ReceiptHookHandlers = {
  * defect in the guard can never block an unrelated run: the host runs
  * `before_agent_run` fail-closed (a throwing handler blocks the request), so
  * these hooks swallow their own failures and fail open. `before_agent_run` is
- * additionally an input gate on the installed host: its runner normalizes a
- * nullish handler result to a block, so the handler returns the explicit
- * `{ outcome: "pass" }` decision on every path - eligible, ordinary, and
- * internal-error alike - and never signals "no opinion" with `void`. Raw
+ * additionally an input gate on the installed host: its runner blocks a
+ * `null` handler result outright, and only an incidental `!== undefined`
+ * guard in the generic merge layer keeps `undefined` from the same
+ * normalization, so the handler returns the explicit `{ outcome: "pass" }`
+ * decision on every path - eligible, ordinary, and internal-error alike -
+ * and never signals "no opinion" with `void`. Raw
  * prompt text, outbound content, destinations, and identifiers never reach
  * the logger or a hook result; the only guard-authored strings emitted are
  * stable reason codes and the fixed bounded revise instruction.
@@ -260,8 +264,9 @@ export function createReceiptHookHandlers(
       // Fail open: a tracker defect must never block an agent run.
     }
     // Explicit pass on every non-blocking path, including the catch above:
-    // the installed runner treats a nullish result as an invalid decision
-    // and would block the run.
+    // the installed runner blocks a null result as an invalid decision, and
+    // undefined survives only an incidental merge-layer guard, so explicit
+    // pass is the only stable contract.
     return { outcome: "pass" };
   };
 
