@@ -15,7 +15,7 @@ import type {
   BeforeAgentFinalizeEvent,
   BeforeAgentFinalizeResult,
   BeforeAgentRunEvent,
-  BeforeAgentRunResult,
+  BeforeAgentRunPassDecision,
   BeforeToolCallEvent,
   BeforeToolCallResult,
   GuardHostApi,
@@ -191,10 +191,16 @@ export function createBeforeToolCallHandler(
 }
 
 export type ReceiptHookHandlers = {
+  /**
+   * Always returns the explicit pass decision: the installed runner's
+   * `runBeforeAgentRun` normalizes a nullish handler result to a block
+   * (`before_agent_run returned an invalid decision`), so a `void` return is
+   * not a safe way to say "not my run" on this host.
+   */
   beforeAgentRun: (
     event: BeforeAgentRunEvent,
     ctx?: AgentHookContext,
-  ) => BeforeAgentRunResult;
+  ) => BeforeAgentRunPassDecision;
   messageSent: (event: MessageSentEvent, ctx?: MessageHookContext) => void;
   beforeAgentFinalize: (
     event: BeforeAgentFinalizeEvent,
@@ -207,12 +213,16 @@ export type ReceiptHookHandlers = {
  * Owner-checkpoint delivery-receipt handlers.
  *
  * All four share one bounded in-memory tracker. Every handler is wrapped so a
- * defect in the guard can never block an unrelated run: the host treats a
- * throwing `before_agent_run` hook as a blocked request, so these hooks
- * swallow their own failures and fail open. Raw prompt text, outbound
- * content, destinations, and identifiers never reach the logger or a hook
- * result; the only guard-authored strings emitted are stable reason codes
- * and the fixed bounded revise instruction.
+ * defect in the guard can never block an unrelated run: the host runs
+ * `before_agent_run` fail-closed (a throwing handler blocks the request), so
+ * these hooks swallow their own failures and fail open. `before_agent_run` is
+ * additionally an input gate on the installed host: its runner normalizes a
+ * nullish handler result to a block, so the handler returns the explicit
+ * `{ outcome: "pass" }` decision on every path - eligible, ordinary, and
+ * internal-error alike - and never signals "no opinion" with `void`. Raw
+ * prompt text, outbound content, destinations, and identifiers never reach
+ * the logger or a hook result; the only guard-authored strings emitted are
+ * stable reason codes and the fixed bounded revise instruction.
  */
 export function createReceiptHookHandlers(
   api: Pick<GuardHostApi, "logger" | "pluginConfig">,
@@ -225,7 +235,7 @@ export function createReceiptHookHandlers(
   const beforeAgentRun = (
     event: BeforeAgentRunEvent,
     ctx?: AgentHookContext,
-  ): BeforeAgentRunResult => {
+  ): BeforeAgentRunPassDecision => {
     try {
       const outcome = tracker.register(event?.prompt, ctx ?? {});
       if (outcome.kind === "registered") {
@@ -249,7 +259,10 @@ export function createReceiptHookHandlers(
     } catch {
       // Fail open: a tracker defect must never block an agent run.
     }
-    return undefined;
+    // Explicit pass on every non-blocking path, including the catch above:
+    // the installed runner treats a nullish result as an invalid decision
+    // and would block the run.
+    return { outcome: "pass" };
   };
 
   const messageSent = (

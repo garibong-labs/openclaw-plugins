@@ -445,12 +445,13 @@ describe("receipt hook handlers", () => {
       new CheckpointReceiptTracker(),
       ENFORCE_RECEIPT_CONFIG,
     );
-    assert.equal(
+    assert.deepEqual(
       handlers.beforeAgentRun(
         { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
         CHECKPOINT_RUN_CONTEXT,
       ),
-      undefined,
+      { outcome: "pass" },
+      "an eligible checkpoint must be tracked and explicitly passed",
     );
     handlers.messageSent(
       {
@@ -489,9 +490,12 @@ describe("receipt hook handlers", () => {
       new CheckpointReceiptTracker(),
       DEFAULT_GUARD_CONFIG,
     );
-    handlers.beforeAgentRun(
-      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
-      CHECKPOINT_RUN_CONTEXT,
+    assert.deepEqual(
+      handlers.beforeAgentRun(
+        { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+        CHECKPOINT_RUN_CONTEXT,
+      ),
+      { outcome: "pass" },
     );
     const result = handlers.beforeAgentFinalize(
       {
@@ -512,9 +516,12 @@ describe("receipt hook handlers", () => {
       new CheckpointReceiptTracker(),
       ENFORCE_RECEIPT_CONFIG,
     );
-    handlers.beforeAgentRun(
-      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
-      CHECKPOINT_RUN_CONTEXT,
+    assert.deepEqual(
+      handlers.beforeAgentRun(
+        { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+        CHECKPOINT_RUN_CONTEXT,
+      ),
+      { outcome: "pass" },
     );
     const finalizeEvent = {
       sessionId: "example-session-id-1",
@@ -554,12 +561,13 @@ describe("receipt hook handlers", () => {
       new CheckpointReceiptTracker(),
       ENFORCE_RECEIPT_CONFIG,
     );
-    assert.equal(
+    assert.deepEqual(
       handlers.beforeAgentRun(
         { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
         { trigger: "user", sessionKey: "example-session-key-1" },
       ),
-      undefined,
+      { outcome: "pass" },
+      "an ordinary marker-only turn must be explicitly passed, not voided",
     );
     handlers.messageSent(
       {
@@ -584,6 +592,31 @@ describe("receipt hook handlers", () => {
     assert.equal(logs.length, 0);
   });
 
+  it("returns an explicit pass even when the tracker itself is defective", () => {
+    // The host runs before_agent_run fail-closed and normalizes a nullish
+    // result to a block, so the internal-error path must still produce the
+    // explicit pass decision - fail open means pass, not void.
+    const throwingTracker = new (class extends CheckpointReceiptTracker {
+      override register(): never {
+        throw new Error("synthetic tracker defect");
+      }
+    })();
+    const { api, logs } = createFakeApi();
+    const handlers = createReceiptHookHandlers(
+      api,
+      throwingTracker,
+      ENFORCE_RECEIPT_CONFIG,
+    );
+    assert.deepEqual(
+      handlers.beforeAgentRun(
+        { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+        CHECKPOINT_RUN_CONTEXT,
+      ),
+      { outcome: "pass" },
+    );
+    assert.equal(logs.length, 0);
+  });
+
   it("never emits raw prompt text, content, destinations, or identifiers", () => {
     const { api, logs } = createFakeApi();
     const handlers = createReceiptHookHandlers(
@@ -600,13 +633,14 @@ describe("receipt hook handlers", () => {
       channel: `messenger-${SECRET}`,
       channelId: `conversation-${SECRET}`,
     };
-    handlers.beforeAgentRun(
+    const runDecision = handlers.beforeAgentRun(
       {
         prompt: `${OWNER_CHECKPOINT_MARKER}\n비밀 프롬프트 ${SECRET}`,
         messages: [],
       },
       taintedCtx,
     );
+    assert.deepEqual(runDecision, { outcome: "pass" });
     handlers.messageSent(
       {
         to: `other-${SECRET}`,
@@ -633,6 +667,7 @@ describe("receipt hook handlers", () => {
 
     const emitted = [
       flatten(logs),
+      JSON.stringify(runDecision),
       JSON.stringify(result ?? {}),
     ].join("\n");
     assert.equal(emitted.includes(SECRET), false);
@@ -654,17 +689,28 @@ describe("receipt hook handlers", () => {
     );
     const { channelId: _omitted, ...withoutConversation } =
       CHECKPOINT_RUN_CONTEXT;
-    handlers.beforeAgentRun(
-      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
-      withoutConversation,
+    // Uncorrelatable, registered, and ambiguous runs alike must yield the
+    // explicit pass decision.
+    assert.deepEqual(
+      handlers.beforeAgentRun(
+        { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+        withoutConversation,
+      ),
+      { outcome: "pass" },
     );
-    handlers.beforeAgentRun(
-      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
-      CHECKPOINT_RUN_CONTEXT,
+    assert.deepEqual(
+      handlers.beforeAgentRun(
+        { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+        CHECKPOINT_RUN_CONTEXT,
+      ),
+      { outcome: "pass" },
     );
-    handlers.beforeAgentRun(
-      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
-      { ...CHECKPOINT_RUN_CONTEXT, runId: "example-run-2" },
+    assert.deepEqual(
+      handlers.beforeAgentRun(
+        { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+        { ...CHECKPOINT_RUN_CONTEXT, runId: "example-run-2" },
+      ),
+      { outcome: "pass" },
     );
     const flattened = flatten(logs);
     const uncorrelatable = flattened

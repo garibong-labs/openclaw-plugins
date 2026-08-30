@@ -110,6 +110,17 @@ correlation fields is left completely untouched. Two pending runs sharing one
 session key cannot be told apart on the outbound path, so both are dropped
 from tracking (fail open) rather than guessed at.
 
+Whatever the classification - eligible, ordinary, uncorrelatable, ambiguous,
+or an internal guard defect - the handler returns the host's explicit
+`{ outcome: "pass" }` gate decision, never `void`. The exported host type
+(`PluginHookBeforeAgentRunResult`) allows `void`, but the installed build's
+`runBeforeAgentRun` normalizes a nullish handler result into a block
+(`before_agent_run returned an invalid decision`), so a `void`-returning
+handler is one host refactor away from blocking every run it observes. The
+target-build smoke pins that runner behavior with a synthetic probe and
+asserts every scenario yields an explicit pass decision from the installed
+runner.
+
 **Receipt (`message_sent`).** A publication receipt is counted only when the
 send succeeded, carries a non-empty message id, correlates to the tracked run
 (session key, with run-id consistency checked when both sides carry one), and

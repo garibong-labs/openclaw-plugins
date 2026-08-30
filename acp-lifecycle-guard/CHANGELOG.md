@@ -32,10 +32,24 @@ plugin is versioned independently of the repository and follows
 - New stable reason codes under `acp_lifecycle_guard.receipt.*`
   (`checkpoint_registered`, `uncorrelatable`, `confirmed`, `target_mismatch`,
   `missing`, `revise_requested`, `revise_exhausted`).
+- **Explicit `before_agent_run` pass contract.** The receipt guard's
+  `before_agent_run` handler returns the host's explicit
+  `{ outcome: "pass" }` gate decision on every non-blocking path - eligible,
+  ordinary, uncorrelatable, ambiguous, and internal-error (fail-open) alike -
+  and never signals "no opinion" with `void`. The exported host type
+  (`PluginHookBeforeAgentRunResult`) allows `void`, but the installed
+  `openclaw@2026.7.1-2` runner's `runBeforeAgentRun` merge normalizes a
+  nullish handler result into a block
+  (`before_agent_run returned an invalid decision`); runtime behavior is
+  authoritative, and a handler relying on `void` could block every agent run.
 - Target-build smoke coverage driving the built plugin through the installed
   hook runner and the installed harness finalize helper for all four receipt
   hooks: registration, correlation, receipt acceptance, enforce-mode revise,
-  cleanup, ordinary-turn bypass, and no-raw-content logging.
+  cleanup, ordinary-turn bypass, and no-raw-content logging. The smoke also
+  pins the installed gate's nullish normalization with a synthetic probe
+  (`null` blocks; `undefined` survives only an incidental guard in the
+  generic merge layer) and asserts every `before_agent_run` scenario yields
+  an explicit pass decision from the installed runner.
 
 ### Notes
 

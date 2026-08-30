@@ -28,7 +28,14 @@
  *    into plain continuation (proving the host fails open there - the guard
  *    logs the exhaustion instead of claiming delivery), cleanup on
  *    `agent_end` is deterministic, and ordinary turns bypass everything.
- * 7. No raw outbound content, prompt text, command text, agent id, or
+ * 7. `before_agent_run` is an input gate on this host: `runBeforeAgentRun`
+ *    normalizes a nullish handler result to a block (`before_agent_run
+ *    returned an invalid decision`). A synthetic probe pins that behavior on
+ *    the installed build, and every receipt scenario - eligible, ordinary
+ *    marker-only, and uncorrelatable - is asserted to produce an explicit
+ *    pass decision from the installed runner, so a regression back to a
+ *    `void` return cannot escape this smoke again.
+ * 8. No raw outbound content, prompt text, command text, agent id, or
  *    correlation identifier reaches a log line, the cancel reason, the block
  *    reason, a revise reason, or the hook metadata.
  *
@@ -299,6 +306,61 @@ async function main(): Promise<void> {
       `built entry registers ${HOOK_NAME}, ${TOOL_HOOK_NAME}, and the four receipt hooks`,
     );
 
+    // Pin the installed gate's nullish normalization with synthetic handlers
+    // before wiring the real plugin: the exported host type still allows
+    // `void`, but on this build a `null` result is normalized into a block
+    // and only an incidental `!== undefined` guard in the generic hook-merge
+    // layer keeps `undefined` from doing the same. The explicit-pass
+    // assertions below rest on this observed behavior, not on the type.
+    const probeGateDecision = async (
+      probeHandler: () => unknown,
+    ): Promise<
+      { decision?: { outcome?: string; reason?: string } } | undefined
+    > => {
+      pluginRuntime.initializeGlobalHookRunner({
+        hooks: [],
+        typedHooks: [
+          {
+            pluginId: "smoke-nullish-probe",
+            hookName: "before_agent_run",
+            handler: probeHandler,
+            priority: 0,
+            source: "smoke:target-build",
+          },
+        ],
+        plugins: [{ id: "smoke-nullish-probe", status: "loaded" }],
+      });
+      const probeRunner = pluginRuntime.getGlobalHookRunner();
+      const outcome = await probeRunner.runBeforeAgentRun(
+        { prompt: "smoke nullish probe", messages: [] },
+        { trigger: "user" },
+      );
+      pluginRuntime.resetGlobalHookRunner();
+      return outcome as
+        | { decision?: { outcome?: string; reason?: string } }
+        | undefined;
+    };
+    const nullProbe = await probeGateDecision(() => null);
+    assert.equal(
+      nullProbe?.decision?.outcome,
+      "block",
+      "installed runner no longer blocks a null before_agent_run result; re-verify the gate contract before trusting this smoke",
+    );
+    assert.equal(
+      nullProbe?.decision?.reason,
+      "before_agent_run returned an invalid decision",
+      "installed runner changed its nullish-normalization reason; re-verify the gate contract",
+    );
+    const undefinedProbe = await probeGateDecision(() => undefined);
+    assert.equal(
+      undefinedProbe,
+      undefined,
+      "installed runner started merging undefined before_agent_run results; if this fails, undefined now reaches the nullish normalization and would block - the guard's explicit pass remains the only safe contract either way",
+    );
+    record(
+      "installed gate blocks a synthetic null before_agent_run result (undefined survives only the outer merge guard); explicit pass is the only stable contract",
+    );
+
     pluginRuntime.initializeGlobalHookRunner({
       hooks: [],
       typedHooks,
@@ -444,7 +506,7 @@ async function main(): Promise<void> {
 
     // Happy path: eligible cron checkpoint, exact-target receipt, untouched
     // finalize, deterministic cleanup. Duplicate receipts must be idempotent.
-    await startCheckpoint("happy");
+    const happyStart = await startCheckpoint("happy");
     await sendCheckpointReport("happy", { success: false });
     await sendCheckpointReport("happy");
     await sendCheckpointReport("happy");
@@ -454,7 +516,7 @@ async function main(): Promise<void> {
 
     // Wrong-target success must not count; enforce mode revises, and a later
     // exact-target receipt satisfies the guard.
-    await startCheckpoint("wrong");
+    const wrongStart = await startCheckpoint("wrong");
     await sendCheckpointReport("wrong", {
       conversation: SMOKE_WRONG_CONVERSATION,
     });
@@ -473,7 +535,7 @@ async function main(): Promise<void> {
 
     // Exhausted revise budget: drive the *installed* harness finalize helper,
     // which owns the host-side retry accounting.
-    await startCheckpoint("budget");
+    const budgetStart = await startCheckpoint("budget");
     const budgetDecisions: Array<{ action?: string; reason?: string }> = [];
     for (
       let round = 0;
@@ -496,7 +558,7 @@ async function main(): Promise<void> {
       trigger: "user",
       sessionKey: "smoke-session-cleanup",
     };
-    await runner.runBeforeAgentRun(
+    const ordinaryStart = await runner.runBeforeAgentRun(
       { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
       ordinaryRunCtx,
     );
@@ -506,7 +568,7 @@ async function main(): Promise<void> {
     );
     const { channelId: _omitted, ...uncorrelatable } =
       cronRunContext("cleanup");
-    await runner.runBeforeAgentRun(
+    const uncorrelatableStart = await runner.runBeforeAgentRun(
       { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
       uncorrelatable,
     );
@@ -571,6 +633,28 @@ async function main(): Promise<void> {
       "an ordinary command from a non-main agent must pass untouched",
     );
     record("ordinary command from a non-main agent passes untouched");
+
+    // Every before_agent_run scenario must come back from the *installed*
+    // runner as an explicit pass decision attributed to this plugin. A void
+    // or null handler result would surface here as either `undefined` or the
+    // gate's invalid-decision block.
+    const gatePass = { decision: { outcome: "pass" }, pluginId: PLUGIN_ID };
+    for (const [label, gateResult] of [
+      ["eligible (happy)", happyStart],
+      ["eligible (wrong-target)", wrongStart],
+      ["eligible (budget)", budgetStart],
+      ["ordinary marker-only", ordinaryStart],
+      ["uncorrelatable cron", uncorrelatableStart],
+    ] as const) {
+      assert.deepEqual(
+        gateResult,
+        gatePass,
+        `before_agent_run (${label}) must yield an explicit pass decision from the installed runner`,
+      );
+    }
+    record(
+      "every before_agent_run scenario yields an explicit pass decision from the installed runner - no run is blocked by the receipt guard",
+    );
 
     assert.equal(
       happyFinalize,

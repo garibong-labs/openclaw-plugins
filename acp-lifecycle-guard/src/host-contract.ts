@@ -105,12 +105,8 @@ export type BeforeAgentRunEvent = {
   senderIsOwner?: boolean;
 };
 
-/**
- * Mirrors `PluginHookBeforeAgentRunResult` (`InputGateDecision | void`).
- * This guard only ever passes; the block arm exists to keep the mirror
- * faithful to the host contract.
- */
-export type BeforeAgentRunResult =
+/** Mirrors the host's `InputGateDecision`. */
+export type InputGateDecision =
   | { outcome: "pass" }
   | {
       outcome: "block";
@@ -118,8 +114,33 @@ export type BeforeAgentRunResult =
       message?: string;
       category?: string;
       metadata?: Record<string, unknown>;
-    }
-  | void;
+    };
+
+/**
+ * The explicit pass decision - the only result this guard's
+ * `before_agent_run` handler ever returns (see `BeforeAgentRunResult`).
+ */
+export type BeforeAgentRunPassDecision = Extract<
+  InputGateDecision,
+  { outcome: "pass" }
+>;
+
+/**
+ * Mirrors `PluginHookBeforeAgentRunResult` (`InputGateDecision | void`).
+ *
+ * The exported host type allows `void`, but runtime behavior is authoritative
+ * for the pinned build: `runBeforeAgentRun` merges handler results with
+ * `mergeNullResults: true` and normalizes a nullish result to
+ * `{ outcome: "block", reason: "before_agent_run returned an invalid
+ * decision" }`. On `openclaw@2026.7.1-2` a `null` result blocks the run
+ * outright, and an `undefined` result avoids that only through an incidental
+ * `!== undefined` guard in the generic `runModifyingHook` layer - not through
+ * the gate's own normalization. A handler that relies on `void` is therefore
+ * one host refactor away from blocking every run it observes. This guard
+ * never relies on it: every non-blocking path returns the explicit
+ * `BeforeAgentRunPassDecision`.
+ */
+export type BeforeAgentRunResult = InputGateDecision | void;
 
 /** Mirrors `PluginHookMessageSentEvent` (correlation fields only). */
 export type MessageSentEvent = {
