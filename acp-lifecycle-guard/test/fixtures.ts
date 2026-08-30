@@ -158,6 +158,13 @@ export const CHECKPOINT_PROMPT_MARKER_NOT_FIRST = [
   "[owner-progress-checkpoint:v1]",
 ].join("\n");
 
+/** Prompt carrying a near-miss of the marker (version drift on line one). */
+export const CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT = [
+  "[owner-progress-checkpoint:v2]",
+  "",
+  "예시 점검 프롬프트 본문.",
+].join("\n");
+
 /**
  * Synthetic checkpoint result reports. The receipt guard is deliberately
  * content-blind, so one fixture per reported state proves that terminal

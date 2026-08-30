@@ -20,14 +20,42 @@
  *   `jobId` requirement would misclassify every real embedded checkpoint as
  *   ineligible. Only the CLI-runner path exposes `jobId` here; it is treated
  *   as an optional field that is never read for decisions and never logged.
+ *   The target-build smoke proves eligibility behaviorally on both shapes
+ *   (with and without `jobId`).
  * - `message_sent` counts a publication receipt only for a successful send
  *   with a message id whose correlation and destination match the eligible
  *   run exactly. The destination is derived from the trusted hook context at
- *   registration time, never from prompt text.
+ *   registration time, never from prompt text. A send whose destination
+ *   metadata is absent is reported as *unverifiable*, distinct from a
+ *   verified mismatch.
  * - `before_agent_finalize` decides: pass with a receipt, observe or revise
  *   without one.
- * - `agent_end` cleans up deterministically; a size cap and TTL bound the
- *   state of abandoned runs.
+ * - `agent_end` cleans up deterministically when the ending run's identity
+ *   provably agrees with the tracked one; a size cap and TTL tombstones
+ *   bound the state of abandoned runs without silently disarming pending
+ *   checkpoints.
+ *
+ * ## Correlation rule (single source of truth)
+ *
+ * Every transition correlates through the same rule: the session key selects
+ * the entry (the host guarantees `sessionKey` equality between the agent-run
+ * hooks and outbound delivery hooks, while `runId` is *never* populated on
+ * the installed outbound `message_sent` path - `createMessageSentEmitter`
+ * and the telegram sent-hook builder both build the canonical context
+ * without one), and run ids act as a consistency check:
+ *
+ * - *contradiction* (both sides carry a run id and they differ) always means
+ *   "not the tracked run";
+ * - the destructive `end` transition additionally requires *exact agreement*
+ *   (`entry.runId === correlation.runId`, where both-absent counts as
+ *   agreement because the pinned host builds both hook contexts from the
+ *   same run params) - a run that cannot prove it is the tracked one can
+ *   never silently disarm a pending checkpoint;
+ * - two live registrations on one session key that cannot prove they are the
+ *   same run (either run id absent, or ids differing) are indistinguishable
+ *   at `message_sent` time, so tracking is dropped for both (fail open)
+ *   rather than guessed at. A re-registration that proves the same run id is
+ *   idempotent and preserves receipt and revise state.
  *
  * Everything here is pure and host-free: no I/O, no logging, no clock access
  * except through the injected `now`. Correlation identifiers live only in
@@ -40,16 +68,29 @@
  */
 export const OWNER_CHECKPOINT_MARKER = "[owner-progress-checkpoint:v1]";
 
+/**
+ * Stable stem shared by every versioned form of the marker. Used only to
+ * recognize *near-miss* marker drift on trusted cron provenance (for a
+ * content-free drift signal); never used as authority.
+ */
+export const OWNER_CHECKPOINT_MARKER_STEM = "[owner-progress-checkpoint";
+
 /** Hook-context trigger value that identifies trusted scheduler provenance. */
 export const TRUSTED_SCHEDULER_TRIGGER = "cron";
 
-/** Upper bound on simultaneously tracked checkpoints (oldest evicted first). */
+/** Upper bound on simultaneously tracked checkpoints (stale evicted first). */
 export const MAX_TRACKED_CHECKPOINTS = 64;
 
-/** Age after which an abandoned checkpoint entry is pruned. */
+/**
+ * Age after which a pending checkpoint entry becomes a *stale tombstone*: it
+ * stops arming enforcement (finalize reports it explicitly instead of
+ * revising) but stays observable until the run ends, a new registration
+ * replaces it, or the size cap evicts it. Stale entries are never silently
+ * dropped by the clock alone.
+ */
 export const CHECKPOINT_TTL_MS = 6 * 60 * 60 * 1000;
 
-/** Bounded number of finalize revise rounds requested per checkpoint. */
+/** Bounded number of finalize revise rounds *requested* per checkpoint. */
 export const MAX_RECEIPT_REVISE_ATTEMPTS = 2;
 
 /** Stable idempotency key for the finalize revise retry budget. */
@@ -68,7 +109,11 @@ export const RECEIPT_REVISE_INSTRUCTION =
 
 /**
  * Conversation-target prefixes the host strips when normalizing conversation
- * ids (mirrors `TARGET_PREFIXES` in the host's hook-agent-context builder).
+ * ids. Mirrors the `TARGET_PREFIXES` set in the installed host's
+ * hook-agent-context builder (`stripConversationPrefix`,
+ * `openclaw@2026.7.1-2`) exactly; the host additionally strips the
+ * channel/provider's own name as a prefix, which `normalizeConversationTarget`
+ * also does.
  */
 const TARGET_PREFIXES: readonly string[] = [
   "channel",
@@ -79,6 +124,16 @@ const TARGET_PREFIXES: readonly string[] = [
   "thread",
   "user",
 ];
+
+/**
+ * Bound on repeated prefix stripping. The host strips a single wrapper per
+ * site, but the two sides of a destination comparison pass through the
+ * host's normalization a different number of times (the agent-hook context
+ * id is host-stripped once; the outbound `to` is not stripped at all), so
+ * this module strips *repeatedly* on both sides until no known wrapper
+ * remains, making the comparison symmetric. The bound keeps it total.
+ */
+const MAX_TARGET_PREFIX_STRIPS = 8;
 
 export type ReceiptMode = "observe" | "enforce";
 
@@ -92,18 +147,30 @@ type CheckpointEntry = {
   conversation: string;
   /** True once an exact-destination successful send has been observed. */
   receiptConfirmed: boolean;
-  /** Finalize revise rounds already requested for this checkpoint. */
+  /** Finalize revise rounds already *requested* for this checkpoint. */
   reviseAttempts: number;
-  /** Registration time from the injected clock, for TTL pruning. */
+  /** Registration time from the injected clock, for TTL staleness. */
   registeredAtMs: number;
+  /** True once the TTL has passed: disarmed for enforcement, kept observable. */
+  stale: boolean;
 };
 
 export type RegisterOutcome =
   /** Not an owner checkpoint (or not trusted provenance); leave untouched. */
   | { kind: "not_eligible" }
+  /**
+   * Trusted cron provenance whose prompt carries a *near-miss* of the marker
+   * (the stable stem without the exact first-line form). Not tracked, but
+   * worth a content-free drift signal so a contract version skew is not
+   * silent.
+   */
+  | { kind: "marker_drift" }
   /** Marker and provenance match but a required correlation field is absent. */
   | { kind: "uncorrelatable" }
-  /** A different pending run already claims this session key. */
+  /**
+   * A live pending run already claims this session key and the two
+   * registrations cannot prove they are the same run. Both are dropped.
+   */
   | { kind: "ambiguous" }
   | { kind: "registered" };
 
@@ -112,7 +179,13 @@ export type SendOutcome =
   | { kind: "unrelated" }
   /** Failed send, or a send the host reported without a message id. */
   | { kind: "not_a_receipt" }
-  /** Successful send, but not to the original owner conversation. */
+  /**
+   * Successful correlated send whose destination metadata is missing, so the
+   * destination cannot be verified either way. Distinct from a verified
+   * mismatch; never counts as a receipt.
+   */
+  | { kind: "unverifiable_target" }
+  /** Successful send, but verifiably not to the original owner conversation. */
   | { kind: "target_mismatch" }
   /** First exact-destination successful receipt. */
   | { kind: "receipt" }
@@ -126,6 +199,13 @@ export type FinalizeOutcome =
   | { kind: "receipt_confirmed" }
   /** Observe mode: record the miss, never revise. */
   | { kind: "observed_missing" }
+  /**
+   * The tracked entry outlived the TTL without a receipt. Enforcement is
+   * disarmed (a run this old must not be revised on stale correlation), but
+   * the miss is reported explicitly instead of silently becoming
+   * `unrelated`.
+   */
+  | { kind: "stale_missing" }
   /** Enforce mode: request one bounded revise round. */
   | { kind: "revise"; attempt: number }
   /**
@@ -168,7 +248,7 @@ export type CheckpointSendObservation = {
   conversationId?: string | undefined;
 };
 
-/** Correlation key shared by the finalize and end transitions. */
+/** Correlation key shared by every lookup (see the module header). */
 export type CheckpointCorrelation = {
   sessionKey?: string | undefined;
   runId?: string | undefined;
@@ -196,43 +276,79 @@ export function promptCarriesCheckpointMarker(prompt: unknown): boolean {
 }
 
 /**
- * Strip one known conversation-target prefix (`channel:`, `dm:`, ... or the
+ * True when the prompt carries the marker stem anywhere but is not an exact
+ * marker carrier: a versioned variant, a decorated marker, or a marker that
+ * slipped off the first line. Only consulted for trusted cron provenance,
+ * and only to emit a stable content-free drift signal - never for
+ * eligibility.
+ */
+export function promptNearCheckpointMarker(prompt: unknown): boolean {
+  if (typeof prompt !== "string") {
+    return false;
+  }
+  return (
+    prompt.toLowerCase().includes(OWNER_CHECKPOINT_MARKER_STEM) &&
+    !promptCarriesCheckpointMarker(prompt)
+  );
+}
+
+/**
+ * Strip known conversation-target wrappers (`channel:`, `dm:`, ... or the
  * channel's own name) the way the host does before exposing conversation ids
- * to agent hooks, so both sides of a destination comparison use the same
- * shape. Unknown prefixes are preserved: this is bounded normalization, not
- * parsing.
+ * to agent hooks. The host strips one wrapper per site; because the two
+ * sides of a destination comparison pass through the host a different number
+ * of times, this strips *repeatedly* (bounded) so both sides land on the
+ * same shape. Prefixes compare case-insensitively (host `normalizeKey`);
+ * the remaining id keeps its case, because conversation ids are
+ * case-sensitive on some channels. Unknown prefixes are preserved: this is
+ * bounded normalization, not parsing.
  */
 export function normalizeConversationTarget(
   value: string,
   channel: string,
 ): string {
-  const separatorIndex = value.indexOf(":");
-  if (separatorIndex === -1) {
-    return value;
+  const channelKey = channel.trim().toLowerCase();
+  let current = value;
+  for (let round = 0; round < MAX_TARGET_PREFIX_STRIPS; round += 1) {
+    const separatorIndex = current.indexOf(":");
+    if (separatorIndex === -1) {
+      return current;
+    }
+    const prefix = current.slice(0, separatorIndex).trim().toLowerCase();
+    const suffix = current.slice(separatorIndex + 1).trim();
+    if (suffix.length === 0) {
+      return current;
+    }
+    if (!TARGET_PREFIXES.includes(prefix) && prefix !== channelKey) {
+      return current;
+    }
+    current = suffix;
   }
-  const prefix = value.slice(0, separatorIndex).trim().toLowerCase();
-  const suffix = value.slice(separatorIndex + 1).trim();
-  if (suffix.length === 0) {
-    return value;
-  }
-  if (TARGET_PREFIXES.includes(prefix) || prefix === channel.toLowerCase()) {
-    return suffix;
-  }
-  return value;
+  return current;
+}
+
+/** True when both sides carry a run id and the two ids differ. */
+function runIdsContradict(
+  entryRunId: string | undefined,
+  correlationRunId: string | undefined,
+): boolean {
+  return (
+    entryRunId !== undefined &&
+    correlationRunId !== undefined &&
+    entryRunId !== correlationRunId
+  );
 }
 
 /**
  * Bounded in-memory correlation state for eligible owner checkpoints.
  *
- * Keys are session keys: the host guarantees `sessionKey` equality between
- * the agent-run hooks and outbound delivery hooks, while `runId` is not yet
- * plumbed through the outbound path (see `PluginHookMessageContext` in the
- * installed build). `runId` is therefore used only as a consistency check
- * when both sides carry one.
+ * Keys are session keys; see the module header for the shared correlation
+ * rule and for why `runId` is only ever a consistency check.
  */
 export class CheckpointReceiptTracker {
   private readonly entries = new Map<string, CheckpointEntry>();
   private readonly now: () => number;
+  private evictions = 0;
 
   constructor(now: () => number = Date.now) {
     this.now = now;
@@ -242,13 +358,72 @@ export class CheckpointReceiptTracker {
     return this.entries.size;
   }
 
-  /** Drop entries older than the TTL. Runs before every state transition. */
+  /**
+   * Number of entries removed by bounded-state pressure (size cap, or a
+   * stale tombstone displaced by a new registration) since the last call.
+   * Returned-and-reset so the hook layer can surface every removal as a
+   * stable content-free log signal instead of letting bounded state disarm
+   * checkpoints silently.
+   */
+  takeEvictions(): number {
+    const count = this.evictions;
+    this.evictions = 0;
+    return count;
+  }
+
+  /**
+   * Mark entries older than the TTL stale. Runs before every state
+   * transition. Deliberately never deletes: a stale entry stops arming
+   * enforcement but stays observable until `end`, replacement, or cap
+   * eviction removes it.
+   */
   private prune(): void {
     const cutoff = this.now() - CHECKPOINT_TTL_MS;
-    for (const [key, entry] of this.entries) {
+    for (const entry of this.entries.values()) {
       if (entry.registeredAtMs <= cutoff) {
-        this.entries.delete(key);
+        entry.stale = true;
       }
+    }
+  }
+
+  /**
+   * Shared non-destructive lookup: session key selects the entry; a run-id
+   * contradiction rejects it. Used by `recordSend` and `finalize` so the
+   * correlation rule cannot diverge between transitions.
+   */
+  private lookup(
+    correlation: CheckpointCorrelation,
+  ): { sessionKey: string; entry: CheckpointEntry } | undefined {
+    const sessionKey = nonBlank(correlation.sessionKey);
+    if (sessionKey === undefined) {
+      return undefined;
+    }
+    const entry = this.entries.get(sessionKey);
+    if (entry === undefined) {
+      return undefined;
+    }
+    if (runIdsContradict(entry.runId, nonBlank(correlation.runId))) {
+      return undefined;
+    }
+    return { sessionKey, entry };
+  }
+
+  /** Evict entries beyond the size cap: stale tombstones first, then oldest. */
+  private enforceCap(): void {
+    while (this.entries.size > MAX_TRACKED_CHECKPOINTS) {
+      let victim: string | undefined;
+      for (const [key, entry] of this.entries) {
+        if (entry.stale) {
+          victim = key;
+          break;
+        }
+        victim ??= key;
+      }
+      if (victim === undefined) {
+        break;
+      }
+      this.entries.delete(victim);
+      this.evictions += 1;
     }
   }
 
@@ -256,11 +431,19 @@ export class CheckpointReceiptTracker {
    * Evaluate one `before_agent_run` and track the run when it is an eligible
    * owner checkpoint. Eligibility requires *both* trusted scheduler
    * provenance (`trigger === "cron"`) and the exact first-line marker; a run
-   * carrying only one of the two is not eligible and stays untouched. A cron
-   * `jobId` is deliberately not required (the installed embedded cron runner
-   * omits it from this hook's context; see the module header). A
-   * marker-and-provenance run whose context lacks the session key or
-   * destination fields cannot be correlated and also stays untouched.
+   * carrying only one of the two is not eligible and stays untouched, except
+   * that a cron prompt carrying a *near-miss* of the marker yields the
+   * content-free `marker_drift` signal. A cron `jobId` is deliberately not
+   * required (the installed embedded cron runner omits it from this hook's
+   * context; see the module header). A marker-and-provenance run whose
+   * context lacks the session key or destination fields cannot be correlated
+   * and also stays untouched.
+   *
+   * Re-registration semantics: a registration that proves the same run id as
+   * the live tracked entry is idempotent (receipt and revise state are
+   * preserved); one that cannot prove it drops tracking for the session key
+   * entirely (fail open). A stale tombstone never blocks a new registration;
+   * displacing one counts as an eviction so it stays observable.
    */
   register(prompt: unknown, ctx: CheckpointRunContext): RegisterOutcome {
     this.prune();
@@ -268,6 +451,12 @@ export class CheckpointReceiptTracker {
       nonBlank(ctx.trigger) !== TRUSTED_SCHEDULER_TRIGGER ||
       !promptCarriesCheckpointMarker(prompt)
     ) {
+      if (
+        nonBlank(ctx.trigger) === TRUSTED_SCHEDULER_TRIGGER &&
+        promptNearCheckpointMarker(prompt)
+      ) {
+        return { kind: "marker_drift" };
+      }
       return { kind: "not_eligible" };
     }
 
@@ -284,15 +473,24 @@ export class CheckpointReceiptTracker {
 
     const runId = nonBlank(ctx.runId);
     const existing = this.entries.get(sessionKey);
-    if (existing !== undefined && existing.runId !== runId) {
-      // Two distinct pending runs on one session key cannot be told apart at
-      // message_sent time (outbound hooks correlate by session key only), so
-      // neither is guarded: drop the pending entry and track nothing.
+    if (existing !== undefined && !existing.stale) {
+      if (runId !== undefined && existing.runId === runId) {
+        // Provably the same run re-registering: idempotent, keep state.
+        return { kind: "registered" };
+      }
+      // Two live registrations on one session key that cannot prove they are
+      // the same run cannot be told apart at message_sent time (outbound
+      // hooks correlate by session key only), so neither is guarded: drop
+      // the pending entry and track nothing.
       this.entries.delete(sessionKey);
       return { kind: "ambiguous" };
     }
+    if (existing !== undefined) {
+      // A stale tombstone is disarmed state; replacing it is an eviction.
+      this.entries.delete(sessionKey);
+      this.evictions += 1;
+    }
 
-    this.entries.delete(sessionKey);
     this.entries.set(sessionKey, {
       ...(runId === undefined ? {} : { runId }),
       channel: channel.toLowerCase(),
@@ -300,41 +498,29 @@ export class CheckpointReceiptTracker {
       receiptConfirmed: false,
       reviseAttempts: 0,
       registeredAtMs: this.now(),
+      stale: false,
     });
-    while (this.entries.size > MAX_TRACKED_CHECKPOINTS) {
-      const oldestKey = this.entries.keys().next().value;
-      if (oldestKey === undefined) {
-        break;
-      }
-      this.entries.delete(oldestKey);
-    }
+    this.enforceCap();
     return { kind: "registered" };
   }
 
   /**
    * Evaluate one `message_sent`. A receipt requires a tracked checkpoint
-   * whose session key matches, a successful send, a non-empty message id, a
-   * consistent run id when both sides carry one, and an exact destination
-   * match against the conversation captured from trusted context at
-   * registration. Duplicate matching events are idempotent.
+   * whose correlation matches (shared lookup rule), a successful send, a
+   * non-empty message id, and an exact destination match against the
+   * conversation captured from trusted context at registration. A correlated
+   * successful send without destination metadata is unverifiable, not a
+   * mismatch. Duplicate matching events are idempotent. A late receipt on a
+   * stale entry still counts: better a truthful late confirmation than a
+   * false missing-receipt signal.
    */
   recordSend(observation: CheckpointSendObservation): SendOutcome {
     this.prune();
-    const sessionKey = nonBlank(observation.sessionKey);
-    const entry =
-      sessionKey === undefined ? undefined : this.entries.get(sessionKey);
-    if (entry === undefined) {
+    const found = this.lookup(observation);
+    if (found === undefined) {
       return { kind: "unrelated" };
     }
-
-    const runId = nonBlank(observation.runId);
-    if (
-      runId !== undefined &&
-      entry.runId !== undefined &&
-      runId !== entry.runId
-    ) {
-      return { kind: "unrelated" };
-    }
+    const { entry } = found;
 
     if (
       observation.success !== true ||
@@ -345,9 +531,10 @@ export class CheckpointReceiptTracker {
 
     const channel = nonBlank(observation.channelId);
     const conversation = nonBlank(observation.conversationId);
+    if (channel === undefined || conversation === undefined) {
+      return { kind: "unverifiable_target" };
+    }
     if (
-      channel === undefined ||
-      conversation === undefined ||
       channel.toLowerCase() !== entry.channel ||
       normalizeConversationTarget(conversation, channel) !== entry.conversation
     ) {
@@ -362,31 +549,38 @@ export class CheckpointReceiptTracker {
   }
 
   /**
-   * Evaluate one `before_agent_finalize` for the given mode. Revise rounds
-   * are bounded per checkpoint; the counter survives across finalize calls
-   * for the same run and is cleaned with the entry.
+   * Evaluate one `before_agent_finalize` for the given mode.
+   *
+   * Revise rounds are bounded per checkpoint, and the counter counts
+   * *requested* rounds. The installed host merges finalize results across
+   * plugins (`mergeBeforeAgentFinalize`: another plugin's `finalize` wins
+   * over this guard's `revise`) and acknowledges nothing back to handlers,
+   * so a requested round is not always an applied one. The host's own retry
+   * accounting (`normalizeBeforeAgentFinalizeResult`, keyed by run id and
+   * this guard's idempotency key, charged only when a revise decision wins
+   * the merge) is the authoritative bound on *applied* rounds. When another
+   * plugin's decision wins, this guard under-requests rather than
+   * over-revises - it degrades toward finalizing without a receipt, which is
+   * this repository's fail-open direction, and the miss is still recorded
+   * loudly through the `exhausted` outcome. The target-build smoke pins both
+   * sides of this contract.
    */
   finalize(
     correlation: CheckpointCorrelation,
     mode: ReceiptMode,
   ): FinalizeOutcome {
     this.prune();
-    const sessionKey = nonBlank(correlation.sessionKey);
-    const entry =
-      sessionKey === undefined ? undefined : this.entries.get(sessionKey);
-    if (entry === undefined) {
+    const found = this.lookup(correlation);
+    if (found === undefined) {
       return { kind: "unrelated" };
     }
-    const runId = nonBlank(correlation.runId);
-    if (
-      runId !== undefined &&
-      entry.runId !== undefined &&
-      runId !== entry.runId
-    ) {
-      return { kind: "unrelated" };
-    }
+    const { entry } = found;
     if (entry.receiptConfirmed) {
       return { kind: "receipt_confirmed" };
+    }
+    if (entry.stale) {
+      // Disarmed by the TTL, but explicitly observable - never silent.
+      return { kind: "stale_missing" };
     }
     if (mode !== "enforce") {
       return { kind: "observed_missing" };
@@ -400,9 +594,13 @@ export class CheckpointReceiptTracker {
 
   /**
    * Deterministic cleanup on `agent_end` and other terminal paths. The entry
-   * is removed only when the ending run is the tracked one: a different
-   * run id ending on the same session key leaves the pending checkpoint in
-   * place (it is bounded by the TTL and size cap regardless).
+   * is removed only when the ending run's identity *exactly agrees* with the
+   * tracked one: both run ids present and equal, or both absent (the pinned
+   * host derives both hook contexts from the same run params, so matching
+   * absence is the same-run shape). A run that carries a different id - or
+   * that cannot prove identity because exactly one side carries an id -
+   * never disarms a pending checkpoint; such entries stay bounded by the
+   * TTL tombstone and the size cap instead.
    */
   end(correlation: CheckpointCorrelation): void {
     this.prune();
@@ -414,12 +612,7 @@ export class CheckpointReceiptTracker {
     if (entry === undefined) {
       return;
     }
-    const runId = nonBlank(correlation.runId);
-    if (
-      runId !== undefined &&
-      entry.runId !== undefined &&
-      runId !== entry.runId
-    ) {
+    if (entry.runId !== nonBlank(correlation.runId)) {
       return;
     }
     this.entries.delete(sessionKey);

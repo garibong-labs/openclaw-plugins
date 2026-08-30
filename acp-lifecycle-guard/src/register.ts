@@ -2,10 +2,11 @@
  * Hook registration.
  *
  * Every handler is thin: it resolves config, delegates to a pure policy
- * module, translates the decision into the host's hook result shape, and emits
- * at most one content-free log line. Raw prompt text and outbound content
- * never reach the logger, a cancel reason, a revise reason or instruction, or
- * hook metadata.
+ * module, translates the decision into the host's hook result shape, and
+ * emits a bounded number of content-free log lines (one per decision, plus
+ * one when bounded-state eviction occurred). Raw prompt text and outbound
+ * content never reach the logger, a cancel reason, a revise reason or
+ * instruction, or hook metadata.
  */
 
 import { resolveGuardConfig, type GuardConfig } from "./config.ts";
@@ -259,6 +260,25 @@ export function createReceiptHookHandlers(
           kind: "receipt",
           reason: ReasonCodes.ReceiptUncorrelatable,
         });
+      } else if (outcome.kind === "marker_drift") {
+        // Trusted cron provenance with a near-miss marker: a content-free
+        // drift signal only. The prompt itself is never logged.
+        logDecision(api.logger, "warn", {
+          hook: "before_agent_run",
+          outcome: "observed",
+          kind: "receipt",
+          reason: ReasonCodes.ReceiptMarkerDrift,
+        });
+      }
+      // Bounded-state pressure (size cap, displaced stale tombstone) must
+      // never remove tracked checkpoints silently.
+      if (tracker.takeEvictions() > 0) {
+        logDecision(api.logger, "warn", {
+          hook: "before_agent_run",
+          outcome: "observed",
+          kind: "receipt",
+          reason: ReasonCodes.ReceiptEvicted,
+        });
       }
     } catch {
       // Fail open: a tracker defect must never block an agent run.
@@ -275,6 +295,15 @@ export function createReceiptHookHandlers(
     ctx?: MessageHookContext,
   ): void => {
     try {
+      // Field sourcing mirrors the installed sent-message mappers
+      // (`buildCanonicalSentMessageHookContext` -> `toPluginMessageSentEvent`
+      // / `toPluginMessageContext`, openclaw@2026.7.1-2): the context always
+      // carries `channelId` and `conversationId` (the latter falling back to
+      // the raw `to` inside the host), and `sessionKey`/`messageId` appear on
+      // both projections of the same canonical value, so each fallback below
+      // reads two host-proven views of one field. `runId` is declared but
+      // never populated on the installed outbound paths; it is read only as
+      // a consistency check.
       const outcome = tracker.recordSend({
         sessionKey: ctx?.sessionKey ?? event?.sessionKey,
         runId: ctx?.runId ?? event?.runId,
@@ -296,6 +325,13 @@ export function createReceiptHookHandlers(
           outcome: "observed",
           kind: "receipt",
           reason: ReasonCodes.ReceiptTargetMismatch,
+        });
+      } else if (outcome.kind === "unverifiable_target") {
+        logDecision(api.logger, "info", {
+          hook: "message_sent",
+          outcome: "observed",
+          kind: "receipt",
+          reason: ReasonCodes.ReceiptTargetUnverifiable,
         });
       }
     } catch {
@@ -328,6 +364,18 @@ export function createReceiptHookHandlers(
         });
         return;
       }
+      if (outcome.kind === "stale_missing") {
+        // The entry outlived the TTL without a receipt: enforcement is
+        // disarmed, but the miss stays loudly observable instead of
+        // silently becoming an unrelated run.
+        logDecision(api.logger, "warn", {
+          hook: "before_agent_finalize",
+          outcome: "observed",
+          kind: "receipt",
+          reason: ReasonCodes.ReceiptStaleMissing,
+        });
+        return;
+      }
       if (outcome.kind === "exhausted") {
         // The host's finalize retry accounting turns further revise requests
         // into plain continuation, so the run will finalize without a
@@ -340,11 +388,18 @@ export function createReceiptHookHandlers(
         });
         return;
       }
+      // Revise budget contract: the tracker counts *requested* rounds; the
+      // installed host merges finalize results across plugins without
+      // acknowledging which decision won, and its own per-run,
+      // per-idempotency-key retry accounting (charged only when a revise
+      // decision wins the merge) bounds the *applied* rounds. When another
+      // plugin's decision wins, this guard under-requests rather than
+      // over-revises; the miss still surfaces through the exhausted log.
       logDecision(api.logger, "warn", {
         hook: "before_agent_finalize",
         outcome: "revise",
         kind: "receipt",
-        reason: ReasonCodes.ReceiptMissing,
+        reason: ReasonCodes.ReceiptReviseRequested,
       });
       return {
         action: "revise",

@@ -76,7 +76,13 @@ export type ToolHookContext = {
   channelId?: string;
 };
 
-/** Mirrors `PluginHookAgentContext` (the fields this plugin reads). */
+/**
+ * Mirrors `PluginHookAgentContext`, narrowed to exactly the fields this
+ * plugin reads. The host context carries more fields (`agentId`,
+ * `sessionId`, `messageProvider`, `chatId`, `senderId`, ...), but none of
+ * them participate in receipt eligibility or correlation, so they are
+ * deliberately not mirrored here.
+ */
 export type AgentHookContext = {
   runId?: string;
   /**
@@ -84,21 +90,16 @@ export type AgentHookContext = {
    * `openclaw@2026.7.1-2`: the CLI-runner cron path includes it, while the
    * embedded cron runner passes `jobId` into `runEmbeddedAgent` and then
    * omits it from the `before_agent_run` hook context it assembles. Never
-   * rely on it for eligibility or correlation.
+   * rely on it for eligibility or correlation; this plugin accepts it for
+   * shape compatibility only and never reads it.
    */
   jobId?: string;
-  agentId?: string;
   sessionKey?: string;
-  sessionId?: string;
   trigger?: string;
   /** Channel/plugin id for channel-originated runs, e.g. a messenger name. */
   channel?: string;
-  messageProvider?: string;
   /** Conversation target id for channel-originated runs. */
   channelId?: string;
-  /** Mirrors `channelId` for compatibility. */
-  chatId?: string;
-  senderId?: string;
 };
 
 /** Mirrors `PluginHookBeforeAgentRunEvent`. */

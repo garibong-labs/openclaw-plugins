@@ -20,23 +20,74 @@ plugin is versioned independently of the repository and follows
   from the `before_agent_run` hook context it assembles (only the CLI-runner
   path exposes it), so a job-id requirement would misclassify every real
   embedded owner checkpoint as ineligible. `jobId` is accepted as an optional
-  context field, never read for decisions and never logged. A publication receipt requires a successful send with a
+  context field, never read for decisions and never logged; the target-build
+  smoke proves eligibility behaviorally on both installed cron context
+  shapes (without `jobId`, and with an inert `jobId`). A publication receipt requires a successful send with a
   non-empty message id, matching run/session correlation, and delivery to the
   exact original owner conversation derived from trusted hook context (a
   failed send followed by an exact-target success passes; a wrong-target
   success does not; duplicates are idempotent). At finalize, a missing
   receipt is logged with `acp_lifecycle_guard.receipt.missing` in observe
   mode; enforce mode returns the host's `revise` result with a fixed bounded
-  instruction, a stable idempotency key, and a bounded `maxAttempts`. State
-  is cleaned deterministically on `agent_end` and bounded by a size cap and
-  TTL.
+  instruction, a stable idempotency key, and a bounded `maxAttempts`, logging
+  each requested round with `acp_lifecycle_guard.receipt.revise_requested`.
+  State is cleaned deterministically on `agent_end` and bounded by a size cap
+  and TTL.
+- **Single correlation rule across all receipt transitions.** `message_sent`,
+  `before_agent_finalize`, and `agent_end` share one lookup: the session key
+  selects the entry (the installed outbound path never populates `runId` on
+  `message_sent`, pinned through the host's own sent-message mappers in the
+  smoke), and run ids act as a consistency check - a contradiction always
+  means "not the tracked run". The destructive `agent_end` cleanup
+  additionally requires **provable identity** (both run ids equal, or both
+  absent - the same-run shape on the pinned host), so a different or
+  unprovable run can never silently disarm a pending checkpoint.
+- **Conservative same-session-key registration.** A re-registration that
+  proves the same run id is idempotent and preserves receipt/revise state; two
+  live registrations that cannot prove they are the same run (differing run
+  ids, or either side missing one) drop tracking for the session key entirely
+  (fail open) instead of overwriting the first run's state.
+- **Bounded state without silent disarmament.** Past the TTL a pending entry
+  becomes a stale tombstone: enforcement is disarmed, but a receipt-less
+  finalize is reported explicitly with
+  `acp_lifecycle_guard.receipt.stale_missing`, a late exact-target receipt
+  still confirms, and a provable `agent_end` still cleans up. Size-cap
+  pressure and tombstone displacement are surfaced with
+  `acp_lifecycle_guard.receipt.evicted` (stale entries evicted before fresh
+  ones) instead of removing tracked checkpoints silently.
+- **Host-mirroring destination normalization.** Destination comparison strips
+  the installed host's conversation-target wrapper vocabulary (`channel:`,
+  `chat:`, `direct:`, `dm:`, `group:`, `thread:`, `user:`, plus the channel's
+  own name) **repeatedly** with a bound, because the two comparison sides
+  pass through the host's single-strip normalization a different number of
+  times. Prefixes compare case-insensitively; conversation ids keep their
+  case; unknown prefixes are preserved.
+- **Distinct unverifiable-destination outcome.** A correlated successful send
+  whose destination metadata is absent is reported with
+  `acp_lifecycle_guard.receipt.target_unverifiable` instead of being
+  misreported as a target mismatch, and never counts as a receipt.
+- **Near-miss marker drift signal.** A trusted cron prompt carrying the
+  marker stem without the exact first-line form (version skew, decoration,
+  or a marker off the first line) emits the content-free
+  `acp_lifecycle_guard.receipt.marker_drift` signal without tracking; exact
+  unrelated cron prompts stay silent, and untrusted provenance never
+  produces the signal.
+- **Documented revise-budget correspondence.** The guard's revise counter
+  bounds *requested* rounds; the installed host's finalize merge lets another
+  plugin's `finalize` win without acknowledgment, and its per-run,
+  per-idempotency-key retry accounting - charged only when a revise decision
+  wins the merge - bounds *applied* rounds. When another plugin's decision
+  wins, the guard under-requests rather than over-revises, and the miss still
+  surfaces through the exhausted log. Both sides are pinned in the
+  target-build smoke against the installed build.
 - Configurable `ownerCheckpointReceiptMode` (`"observe"` | `"enforce"`,
   default `"observe"`). Deliberately independent of the legacy `enforce`
   boolean: enabling the shape guards never activates receipt enforcement,
   which remains a separate operator rollout.
 - New stable reason codes under `acp_lifecycle_guard.receipt.*`
-  (`checkpoint_registered`, `uncorrelatable`, `confirmed`, `target_mismatch`,
-  `missing`, `revise_requested`, `revise_exhausted`).
+  (`checkpoint_registered`, `uncorrelatable`, `marker_drift`, `confirmed`,
+  `target_mismatch`, `target_unverifiable`, `missing`, `stale_missing`,
+  `evicted`, `revise_requested`, `revise_exhausted`).
 - **Explicit `before_agent_run` pass contract.** The receipt guard's
   `before_agent_run` handler returns the host's explicit
   `{ outcome: "pass" }` gate decision on every non-blocking path - eligible,
@@ -51,16 +102,31 @@ plugin is versioned independently of the repository and follows
   refactor away from blocking every agent run.
 - Target-build smoke coverage driving the built plugin through the installed
   hook runner and the installed harness finalize helper for all four receipt
-  hooks: registration, correlation, receipt acceptance, enforce-mode revise,
-  cleanup, ordinary-turn bypass, and no-raw-content logging. Every eligible
-  synthetic cron context omits `jobId` to mirror the installed embedded cron
-  path, and a source-contract probe scans the installed dist for the embedded
-  runner chunk and fails if its `before_agent_run` hook context starts (or
-  stops) omitting `jobId`. The smoke also pins the installed gate's nullish
-  normalization with a synthetic probe (`null` blocks; `undefined` survives
-  only an incidental guard in the generic merge layer) and asserts every
-  `before_agent_run` scenario yields an explicit pass decision from the
-  installed runner.
+  hooks, in phases with the established gates first. Phase A proves the
+  **shipped default configuration** end to end (no `pluginConfig`: shape
+  guards enforce, receipt guard observes and never revises). Phase B proves
+  the enforce-mode receipt scenarios, eligibility on both installed cron
+  context shapes (the embedded runner's `jobId`-less shape and the CLI
+  runner's inert-`jobId` shape - replacing the earlier bundling-sensitive
+  embedded-runner source probe with behavioral evidence), and a receipt
+  delivered through the **installed sent-message mappers** from
+  `openclaw/plugin-sdk/hook-runtime`, pinning the delivery-path correlation
+  contract (no `runId`, preserved `sessionKey`, raw wrapper-prefixed `to` as
+  `conversationId`). Phase C composes the guard with synthetic second
+  plugins: earlier and later `before_agent_run` blocks stay sticky over the
+  guard's explicit pass; a synthetic `finalize` decision wins the installed
+  merge while the guard under-requests conservatively and still logs the
+  miss; and the installed finalize budget is proven to be charged only when
+  a revise decision wins the merge. The smoke also pins the installed gate's
+  nullish normalization with a synthetic probe (`null` blocks; `undefined`
+  survives only an incidental guard in the generic merge layer) and asserts
+  every `before_agent_run` scenario yields an explicit pass decision from
+  the installed runner.
+
+- The mirrored `AgentHookContext` in `src/host-contract.ts` is narrowed to
+  exactly the fields the receipt hooks read (`runId`, `jobId`, `sessionKey`,
+  `trigger`, `channel`, `channelId`), so the contract no longer suggests that
+  unused fields participate in receipt eligibility.
 
 ### Notes
 

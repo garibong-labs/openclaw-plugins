@@ -15,10 +15,12 @@ import {
   RECEIPT_REVISE_INSTRUCTION,
   normalizeConversationTarget,
   promptCarriesCheckpointMarker,
+  promptNearCheckpointMarker,
 } from "../src/receipt/checkpoint.ts";
 import { PLUGIN_ID, createReceiptHookHandlers } from "../src/register.ts";
 import {
   CHECKPOINT_PROMPT_MARKER_NOT_FIRST,
+  CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT,
   CHECKPOINT_REPORT_ACTIVE,
   CHECKPOINT_REPORT_BLOCKED,
   CHECKPOINT_REPORT_TERMINAL_FAILURE,
@@ -109,6 +111,21 @@ describe("checkpoint marker recognition", () => {
     assert.equal(promptCarriesCheckpointMarker(undefined), false);
     assert.equal(promptCarriesCheckpointMarker(42), false);
   });
+
+  it("recognizes near-miss marker drift without treating carriers as drift", () => {
+    for (const nearMiss of [
+      CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT,
+      CHECKPOINT_PROMPT_MARKER_NOT_FIRST,
+      ` ${OWNER_CHECKPOINT_MARKER}`,
+      `${OWNER_CHECKPOINT_MARKER} extra`,
+    ]) {
+      assert.equal(promptNearCheckpointMarker(nearMiss), true);
+    }
+    // Exact carriers and unrelated prompts are not drift.
+    assert.equal(promptNearCheckpointMarker(OWNER_CHECKPOINT_PROMPT), false);
+    assert.equal(promptNearCheckpointMarker("예시 일반 크론 프롬프트"), false);
+    assert.equal(promptNearCheckpointMarker(undefined), false);
+  });
 });
 
 describe("conversation target normalization", () => {
@@ -126,10 +143,41 @@ describe("conversation target normalization", () => {
     }
   });
 
-  it("preserves unknown prefixes", () => {
+  it("strips repeated wrappers so both comparison sides land on one shape", () => {
+    // The host strips one wrapper per site, and the two sides of a
+    // destination comparison pass through it a different number of times;
+    // bounded repeated stripping makes the comparison symmetric.
+    for (const wrapped of [
+      "channel:dm:example-conversation-1",
+      "example-messenger:channel:example-conversation-1",
+      "thread:group:chat:example-conversation-1",
+    ]) {
+      assert.equal(
+        normalizeConversationTarget(wrapped, "example-messenger"),
+        "example-conversation-1",
+      );
+    }
+  });
+
+  it("compares prefixes case-insensitively but preserves id case", () => {
+    assert.equal(
+      normalizeConversationTarget("Channel:Example-Conversation-1", "example-messenger"),
+      "Example-Conversation-1",
+    );
+    assert.equal(
+      normalizeConversationTarget("EXAMPLE-MESSENGER:example-conversation-1", "example-messenger"),
+      "example-conversation-1",
+    );
+  });
+
+  it("preserves unknown prefixes and empty suffixes", () => {
     assert.equal(
       normalizeConversationTarget("other:example-conversation-1", "example-messenger"),
       "other:example-conversation-1",
+    );
+    assert.equal(
+      normalizeConversationTarget("channel:", "example-messenger"),
+      "channel:",
     );
   });
 });
@@ -199,10 +247,12 @@ describe("tracker eligibility", () => {
       tracker.register("예시 일반 크론 프롬프트", CHECKPOINT_RUN_CONTEXT).kind,
       "not_eligible",
     );
+    // A cron prompt whose marker slipped off the first line is not tracked
+    // either, but surfaces as the content-free drift signal.
     assert.equal(
       tracker.register(CHECKPOINT_PROMPT_MARKER_NOT_FIRST, CHECKPOINT_RUN_CONTEXT)
         .kind,
-      "not_eligible",
+      "marker_drift",
     );
     assert.equal(tracker.size, 0);
   });
@@ -219,6 +269,33 @@ describe("tracker eligibility", () => {
     assert.equal(tracker.size, 0);
   });
 
+  it("signals near-miss marker drift only for trusted cron provenance", () => {
+    const tracker = new CheckpointReceiptTracker();
+    for (const nearMiss of [
+      CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT,
+      CHECKPOINT_PROMPT_MARKER_NOT_FIRST,
+    ]) {
+      assert.equal(
+        tracker.register(nearMiss, CHECKPOINT_RUN_CONTEXT).kind,
+        "marker_drift",
+      );
+    }
+    // Untrusted provenance never produces the drift signal, and exact
+    // unrelated cron prompts stay silent.
+    assert.equal(
+      tracker.register(CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT, {
+        ...CHECKPOINT_RUN_CONTEXT,
+        trigger: "user",
+      }).kind,
+      "not_eligible",
+    );
+    assert.equal(
+      tracker.register("예시 일반 크론 프롬프트", CHECKPOINT_RUN_CONTEXT).kind,
+      "not_eligible",
+    );
+    assert.equal(tracker.size, 0);
+  });
+
   it("drops tracking when a second run makes the session key ambiguous", () => {
     const tracker = new CheckpointReceiptTracker();
     tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
@@ -229,6 +306,68 @@ describe("tracker eligibility", () => {
     assert.equal(outcome.kind, "ambiguous");
     assert.equal(tracker.size, 0);
     assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "unrelated");
+  });
+
+  it("treats registrations that cannot prove the same run as ambiguous", () => {
+    // Two run-id-less registrations are indistinguishable runs.
+    const withoutRunId = { ...CHECKPOINT_RUN_CONTEXT, runId: undefined };
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, withoutRunId);
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, withoutRunId).kind,
+      "ambiguous",
+    );
+    assert.equal(tracker.size, 0);
+
+    // A run-id-less registration over a tracked run with an id, and the
+    // reverse, are equally unprovable.
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, withoutRunId).kind,
+      "ambiguous",
+    );
+    assert.equal(tracker.size, 0);
+    tracker.register(OWNER_CHECKPOINT_PROMPT, withoutRunId);
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT).kind,
+      "ambiguous",
+    );
+    assert.equal(tracker.size, 0);
+  });
+
+  it("keeps receipt and revise state across a provable same-run re-registration", () => {
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "revise");
+    assert.equal(
+      tracker.recordSend(successfulSend(CHECKPOINT_SEND_CONTEXT)).kind,
+      "receipt",
+    );
+
+    // Same run id registers again (e.g. another gate pass in one run).
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT).kind,
+      "registered",
+    );
+    assert.equal(tracker.size, 1);
+    // The confirmed receipt survived - no false missing-receipt revise.
+    assert.equal(
+      tracker.finalize(FINALIZE_KEY, "enforce").kind,
+      "receipt_confirmed",
+    );
+
+    // Revise budget also survives re-registration.
+    const budgetTracker = new CheckpointReceiptTracker();
+    budgetTracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    assert.deepEqual(budgetTracker.finalize(FINALIZE_KEY, "enforce"), {
+      kind: "revise",
+      attempt: 1,
+    });
+    budgetTracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    assert.deepEqual(budgetTracker.finalize(FINALIZE_KEY, "enforce"), {
+      kind: "revise",
+      attempt: 2,
+    });
   });
 });
 
@@ -307,6 +446,59 @@ describe("tracker receipts", () => {
       ).kind,
       "receipt",
     );
+  });
+
+  it("matches asymmetrically wrapped forms of one destination", () => {
+    // Registration side: the host already stripped one wrapper, one remains.
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, {
+      ...CHECKPOINT_RUN_CONTEXT,
+      channelId: "dm:example-conversation-1",
+    });
+    // Send side: the raw outbound target still carries both wrappers.
+    assert.equal(
+      tracker.recordSend(
+        successfulSend({
+          ...CHECKPOINT_SEND_CONTEXT,
+          conversationId: "channel:dm:example-conversation-1",
+        }),
+      ).kind,
+      "receipt",
+    );
+  });
+
+  it("keeps conversation ids case-sensitive after wrapper stripping", () => {
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    assert.equal(
+      tracker.recordSend(
+        successfulSend({
+          ...CHECKPOINT_SEND_CONTEXT,
+          conversationId: "channel:EXAMPLE-CONVERSATION-1",
+        }),
+      ).kind,
+      "target_mismatch",
+    );
+  });
+
+  it("reports missing destination metadata as unverifiable, not mismatch", () => {
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    for (const overrides of [
+      { channelId: undefined },
+      { conversationId: undefined },
+      { channelId: "   ", conversationId: undefined },
+    ]) {
+      assert.equal(
+        tracker.recordSend({
+          ...successfulSend(CHECKPOINT_SEND_CONTEXT),
+          ...overrides,
+        }).kind,
+        "unverifiable_target",
+      );
+    }
+    // An unverifiable send never confirms the receipt.
+    assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "revise");
   });
 
   it("requires a non-empty message id", () => {
@@ -419,18 +611,108 @@ describe("tracker cleanup and bounds", () => {
     assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "unrelated");
   });
 
-  it("prunes abandoned entries after the TTL", () => {
+  it("never lets an unprovable run disarm a tracked checkpoint on end", () => {
+    // Tracked run carries an id; an end without one cannot prove identity.
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    tracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey });
+    assert.equal(tracker.size, 1);
+
+    // Tracked run has no id; an end carrying one cannot prove identity
+    // either. Matching absence is the same-run shape and cleans up.
+    const idlessTracker = new CheckpointReceiptTracker();
+    idlessTracker.register(OWNER_CHECKPOINT_PROMPT, {
+      ...CHECKPOINT_RUN_CONTEXT,
+      runId: undefined,
+    });
+    idlessTracker.end({
+      sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
+      runId: "example-run-9",
+    });
+    assert.equal(idlessTracker.size, 1);
+    idlessTracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey });
+    assert.equal(idlessTracker.size, 0);
+  });
+
+  it("keeps guarding through interleaved unrelated ends", () => {
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    // Another run on the same session key ends first (id-less and
+    // wrong-id shapes); the tracked checkpoint must survive both.
+    tracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey });
+    tracker.end({
+      sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
+      runId: "example-run-9",
+    });
+    assert.equal(
+      tracker.recordSend(successfulSend(CHECKPOINT_SEND_CONTEXT)).kind,
+      "receipt",
+    );
+    assert.equal(
+      tracker.finalize(FINALIZE_KEY, "enforce").kind,
+      "receipt_confirmed",
+    );
+    tracker.end(FINALIZE_KEY);
+    assert.equal(tracker.size, 0);
+  });
+
+  it("turns TTL-old pending entries into explicit stale tombstones", () => {
     let clock = 1_000;
     const tracker = new CheckpointReceiptTracker(() => clock);
     tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
     clock += CHECKPOINT_TTL_MS - 1;
     assert.equal(tracker.finalize(FINALIZE_KEY, "observe").kind, "observed_missing");
     clock += 1;
-    assert.equal(tracker.finalize(FINALIZE_KEY, "observe").kind, "unrelated");
+    // Past the TTL the miss stays observable and enforcement is disarmed -
+    // never a silent `unrelated`, never a revise on stale correlation.
+    assert.equal(tracker.finalize(FINALIZE_KEY, "observe").kind, "stale_missing");
+    assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "stale_missing");
+    assert.equal(tracker.size, 1);
+    // A provable end still cleans the tombstone.
+    tracker.end(FINALIZE_KEY);
     assert.equal(tracker.size, 0);
   });
 
-  it("caps tracked checkpoints by evicting the oldest", () => {
+  it("still accepts a late exact-target receipt on a long-active run", () => {
+    let clock = 1_000;
+    const tracker = new CheckpointReceiptTracker(() => clock);
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    clock += CHECKPOINT_TTL_MS + 1;
+    assert.equal(
+      tracker.recordSend(successfulSend(CHECKPOINT_SEND_CONTEXT)).kind,
+      "receipt",
+    );
+    assert.equal(
+      tracker.finalize(FINALIZE_KEY, "enforce").kind,
+      "receipt_confirmed",
+    );
+  });
+
+  it("lets a new registration displace a stale tombstone as an observable eviction", () => {
+    let clock = 1_000;
+    const tracker = new CheckpointReceiptTracker(() => clock);
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    clock += CHECKPOINT_TTL_MS + 1;
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, {
+        ...CHECKPOINT_RUN_CONTEXT,
+        runId: "example-run-2",
+      }).kind,
+      "registered",
+    );
+    assert.equal(tracker.size, 1);
+    assert.equal(tracker.takeEvictions(), 1);
+    assert.equal(tracker.takeEvictions(), 0);
+    assert.equal(
+      tracker.finalize(
+        { sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey, runId: "example-run-2" },
+        "enforce",
+      ).kind,
+      "revise",
+    );
+  });
+
+  it("caps tracked checkpoints by evicting stale entries first, then the oldest", () => {
     const tracker = new CheckpointReceiptTracker();
     for (let index = 0; index <= MAX_TRACKED_CHECKPOINTS; index += 1) {
       tracker.register(OWNER_CHECKPOINT_PROMPT, {
@@ -440,12 +722,48 @@ describe("tracker cleanup and bounds", () => {
       });
     }
     assert.equal(tracker.size, MAX_TRACKED_CHECKPOINTS);
+    assert.equal(tracker.takeEvictions(), 1);
     assert.equal(
       tracker.finalize(
         { sessionKey: "example-session-key-0", runId: "example-run-0" },
         "enforce",
       ).kind,
       "unrelated",
+    );
+
+    // With a stale tombstone present, capacity pressure evicts it before
+    // any fresh pending entry.
+    let clock = 1_000;
+    const staleFirst = new CheckpointReceiptTracker(() => clock);
+    staleFirst.register(OWNER_CHECKPOINT_PROMPT, {
+      ...CHECKPOINT_RUN_CONTEXT,
+      sessionKey: "example-session-key-stale",
+      runId: "example-run-stale",
+    });
+    clock += CHECKPOINT_TTL_MS + 1;
+    for (let index = 1; index <= MAX_TRACKED_CHECKPOINTS; index += 1) {
+      staleFirst.register(OWNER_CHECKPOINT_PROMPT, {
+        ...CHECKPOINT_RUN_CONTEXT,
+        sessionKey: `example-session-key-${index}`,
+        runId: `example-run-${index}`,
+      });
+    }
+    assert.equal(staleFirst.size, MAX_TRACKED_CHECKPOINTS);
+    assert.equal(staleFirst.takeEvictions(), 1);
+    assert.equal(
+      staleFirst.finalize(
+        { sessionKey: "example-session-key-stale", runId: "example-run-stale" },
+        "enforce",
+      ).kind,
+      "unrelated",
+    );
+    // The oldest fresh entry survived because the tombstone went first.
+    assert.equal(
+      staleFirst.finalize(
+        { sessionKey: "example-session-key-1", runId: "example-run-1" },
+        "enforce",
+      ).kind,
+      "revise",
     );
   });
 });
@@ -543,8 +861,139 @@ describe("receipt hook handlers", () => {
     assert.match(flatten(logs), new RegExp(ReasonCodes.ReceiptMissing));
   });
 
+  it("logs a content-free drift signal for a near-miss cron marker", () => {
+    const { api, logs } = createFakeApi();
+    const handlers = createReceiptHookHandlers(
+      api,
+      new CheckpointReceiptTracker(),
+      ENFORCE_RECEIPT_CONFIG,
+    );
+    assert.deepEqual(
+      handlers.beforeAgentRun(
+        { prompt: CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT, messages: [] },
+        CHECKPOINT_RUN_CONTEXT,
+      ),
+      { outcome: "pass" },
+    );
+    const flattened = flatten(logs);
+    assert.match(flattened, new RegExp(ReasonCodes.ReceiptMarkerDrift));
+    for (const line of CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT.split("\n")) {
+      if (line.trim().length > 0) {
+        assert.equal(flattened.includes(line), false);
+      }
+    }
+    // No tracking happened: finalize stays untouched.
+    assert.equal(
+      handlers.beforeAgentFinalize(
+        {
+          sessionId: "example-session-id-1",
+          sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
+          stopHookActive: false,
+        },
+        CHECKPOINT_RUN_CONTEXT,
+      ),
+      undefined,
+    );
+
+    // The same near-miss without cron provenance stays completely silent.
+    const { api: quietApi, logs: quietLogs } = createFakeApi();
+    const quietHandlers = createReceiptHookHandlers(
+      quietApi,
+      new CheckpointReceiptTracker(),
+      ENFORCE_RECEIPT_CONFIG,
+    );
+    quietHandlers.beforeAgentRun(
+      { prompt: CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT, messages: [] },
+      { trigger: "user", sessionKey: "example-session-key-1" },
+    );
+    assert.equal(quietLogs.length, 0);
+  });
+
+  it("logs an unverifiable destination distinctly from a mismatch", () => {
+    const { api, logs } = createFakeApi();
+    const handlers = createReceiptHookHandlers(
+      api,
+      new CheckpointReceiptTracker(),
+      ENFORCE_RECEIPT_CONFIG,
+    );
+    handlers.beforeAgentRun(
+      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+      CHECKPOINT_RUN_CONTEXT,
+    );
+    // The host mappers always set ctx.channelId/ctx.conversationId; a
+    // context stripped of both models an unverifiable delivery report.
+    handlers.messageSent(
+      {
+        to: "",
+        content: CHECKPOINT_REPORT_TERMINAL_GREEN,
+        success: true,
+        messageId: "example-message-1",
+      },
+      {
+        channelId: "",
+        sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
+      },
+    );
+    const flattened = flatten(logs);
+    assert.match(flattened, new RegExp(ReasonCodes.ReceiptTargetUnverifiable));
+    assert.equal(
+      flattened.includes(ReasonCodes.ReceiptTargetMismatch),
+      false,
+    );
+  });
+
+  it("logs a stale pending checkpoint explicitly at finalize", () => {
+    let clock = 1_000;
+    const { api, logs } = createFakeApi();
+    const handlers = createReceiptHookHandlers(
+      api,
+      new CheckpointReceiptTracker(() => clock),
+      ENFORCE_RECEIPT_CONFIG,
+    );
+    handlers.beforeAgentRun(
+      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+      CHECKPOINT_RUN_CONTEXT,
+    );
+    clock += CHECKPOINT_TTL_MS + 1;
+    const result = handlers.beforeAgentFinalize(
+      {
+        sessionId: "example-session-id-1",
+        sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
+        runId: CHECKPOINT_RUN_CONTEXT.runId,
+        stopHookActive: false,
+      },
+      CHECKPOINT_RUN_CONTEXT,
+    );
+    // Disarmed (no revise) but never silent.
+    assert.equal(result, undefined);
+    assert.match(flatten(logs), new RegExp(ReasonCodes.ReceiptStaleMissing));
+  });
+
+  it("logs bounded-state evictions instead of dropping entries silently", () => {
+    const { api, logs } = createFakeApi();
+    const handlers = createReceiptHookHandlers(
+      api,
+      new CheckpointReceiptTracker(),
+      ENFORCE_RECEIPT_CONFIG,
+    );
+    for (let index = 0; index <= MAX_TRACKED_CHECKPOINTS; index += 1) {
+      handlers.beforeAgentRun(
+        { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+        {
+          ...CHECKPOINT_RUN_CONTEXT,
+          sessionKey: `example-session-key-${index}`,
+          runId: `example-run-${index}`,
+        },
+      );
+    }
+    const evictionLines = flatten(logs)
+      .split("\n")
+      .filter((line) => line.includes(ReasonCodes.ReceiptEvicted));
+    assert.equal(evictionLines.length, 1);
+  });
+
   it("returns a bounded revise result in enforce mode", () => {
-    const { api } = createFakeApi();
+    const { api, logs } = createFakeApi();
     const handlers = createReceiptHookHandlers(
       api,
       new CheckpointReceiptTracker(),
@@ -576,6 +1025,11 @@ describe("receipt hook handlers", () => {
         maxAttempts: MAX_RECEIPT_REVISE_ATTEMPTS,
       },
     });
+    // Each requested round is logged with the documented revise reason code.
+    const reviseLines = flatten(logs)
+      .split("\n")
+      .filter((line) => line.includes(ReasonCodes.ReceiptReviseRequested));
+    assert.equal(reviseLines.length, 1);
     // Second revise round is still within the bound; the third is not.
     assert.equal(
       handlers.beforeAgentFinalize(finalizeEvent, CHECKPOINT_RUN_CONTEXT)
@@ -586,6 +1040,7 @@ describe("receipt hook handlers", () => {
       handlers.beforeAgentFinalize(finalizeEvent, CHECKPOINT_RUN_CONTEXT),
       undefined,
     );
+    assert.match(flatten(logs), new RegExp(ReasonCodes.ReceiptReviseExhausted));
   });
 
   it("leaves an ordinary turn completely untouched", () => {

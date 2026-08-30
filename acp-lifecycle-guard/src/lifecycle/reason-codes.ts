@@ -57,12 +57,20 @@ export const ReasonCodes = {
   ReceiptCheckpointRegistered: `${REASON_CODE_PREFIX}.receipt.checkpoint_registered`,
   /** Marker plus provenance matched, but correlation fields were missing or ambiguous. */
   ReceiptUncorrelatable: `${REASON_CODE_PREFIX}.receipt.uncorrelatable`,
+  /** Trusted cron prompt carries a near-miss of the checkpoint marker. */
+  ReceiptMarkerDrift: `${REASON_CODE_PREFIX}.receipt.marker_drift`,
   /** Exact-destination successful send receipt confirmed. */
   ReceiptConfirmed: `${REASON_CODE_PREFIX}.receipt.confirmed`,
   /** Successful send from an eligible checkpoint run to a different destination. */
   ReceiptTargetMismatch: `${REASON_CODE_PREFIX}.receipt.target_mismatch`,
+  /** Correlated successful send whose destination metadata cannot be verified. */
+  ReceiptTargetUnverifiable: `${REASON_CODE_PREFIX}.receipt.target_unverifiable`,
   /** Eligible checkpoint reached finalize without a publication receipt. */
   ReceiptMissing: `${REASON_CODE_PREFIX}.receipt.missing`,
+  /** Tracked checkpoint outlived the TTL and reached finalize with no receipt. */
+  ReceiptStaleMissing: `${REASON_CODE_PREFIX}.receipt.stale_missing`,
+  /** Bounded-state pressure removed tracked checkpoint entries. */
+  ReceiptEvicted: `${REASON_CODE_PREFIX}.receipt.evicted`,
   /** Enforce mode requested a bounded finalize revise round. */
   ReceiptReviseRequested: `${REASON_CODE_PREFIX}.receipt.revise_requested`,
   /** Bounded revise budget spent without a receipt; the host will finalize. */

@@ -111,14 +111,26 @@ path the executor passes `jobId` into `runEmbeddedAgent` and the
 it - only the CLI-runner path exposes it. Requiring a job id would therefore
 misclassify every real embedded owner checkpoint as ineligible. `jobId` is
 accepted as an optional context field that is never read for decisions and
-never logged; the target-build smoke pins the installed omission with a
-source-contract probe.
+never logged; the target-build smoke proves eligibility behaviorally on both
+installed shapes (context without `jobId`, and with an inert `jobId`).
 
 The marker alone is never authority: an interactive turn, arbitrary user text
 carrying the marker, a non-cron run, or a run whose context lacks the
-correlation fields is left completely untouched. Two pending runs sharing one
-session key cannot be told apart on the outbound path, so both are dropped
-from tracking (fail open) rather than guessed at.
+correlation fields is left completely untouched. A **trusted cron** prompt
+that carries a *near-miss* of the marker (the stable stem
+`[owner-progress-checkpoint` without the exact first-line form - a version
+skew, a decorated marker, or a marker that slipped off the first line) is
+still not tracked, but emits the stable content-free drift signal
+`acp_lifecycle_guard.receipt.marker_drift` so a contract skew cannot rot
+silently; exact unrelated cron prompts stay silent, and untrusted provenance
+never produces the signal.
+
+Registrations on one session key are conservative: a re-registration that
+proves the **same run id** is idempotent (receipt and revise state are
+preserved), while two live registrations that cannot prove they are the same
+run - differing run ids, or either side missing one - are indistinguishable
+on the outbound path, so both are dropped from tracking (fail open) rather
+than guessed at.
 
 Whatever the classification - eligible, ordinary, uncorrelatable, ambiguous,
 or an internal guard defect - the handler returns the host's explicit
@@ -134,11 +146,25 @@ yields an explicit pass decision from the installed runner.
 
 **Receipt (`message_sent`).** A publication receipt is counted only when the
 send succeeded, carries a non-empty message id, correlates to the tracked run
-(session key, with run-id consistency checked when both sides carry one), and
-was delivered to the **exact original owner conversation** captured from
+(session key, with run-id consistency checked when both sides carry one -
+the installed outbound path never populates `runId` on `message_sent`, which
+the target-build smoke pins through the host's own sent-message mappers),
+and was delivered to the **exact original owner conversation** captured from
 trusted hook context at registration - never from free text in the prompt.
 A failed send followed by an exact-target success passes; a success to any
 other destination does not count; duplicate matching events are idempotent.
+A correlated successful send whose destination metadata is absent is
+reported as `acp_lifecycle_guard.receipt.target_unverifiable`, distinct from
+a verified mismatch, and never counts as a receipt.
+
+Destination comparison uses bounded normalization mirroring the installed
+host's conversation-target vocabulary (`channel:`, `chat:`, `direct:`,
+`dm:`, `group:`, `thread:`, `user:`, plus the channel's own name): wrappers
+are stripped **repeatedly** (bounded) on both sides, because the two sides
+pass through the host's single-strip normalization a different number of
+times. Prefixes compare case-insensitively; the remaining conversation id
+keeps its case, since ids are case-sensitive on some channels. Unknown
+prefixes are preserved, never guessed at.
 
 **Decision (`before_agent_finalize`).** If an eligible checkpoint reaches
 finalize without a receipt:
@@ -147,11 +173,24 @@ finalize without a receipt:
   `acp_lifecycle_guard.receipt.missing` and never intervenes;
 - `enforce` returns the host's `revise` result with a fixed bounded
   instruction requiring one explicit messaging-tool send to the original
-  conversation, a stable idempotency key, and a bounded `maxAttempts`.
+  conversation, a stable idempotency key, and a bounded `maxAttempts`; each
+  requested round is logged with
+  `acp_lifecycle_guard.receipt.revise_requested`.
 
-**Cleanup (`agent_end`).** State is removed deterministically when the tracked
-run ends. Entries are additionally bounded by a size cap (oldest evicted) and
-a TTL, so abandoned runs cannot leak memory.
+**Cleanup (`agent_end`).** State is removed deterministically when the ending
+run's identity **provably agrees** with the tracked one: both run ids present
+and equal, or both absent (the pinned host builds both hook contexts from the
+same run params, so matching absence is the same-run shape). A different or
+unprovable run can never silently disarm a pending checkpoint.
+
+Bounded state never disarms silently. Past the TTL a pending entry becomes a
+**stale tombstone**: enforcement is disarmed (a run that old is never
+revised on stale correlation) but a finalize without a receipt is still
+reported explicitly with `acp_lifecycle_guard.receipt.stale_missing`, a late
+exact-target receipt still confirms, and a provable `agent_end` still cleans
+up. When the size cap or a new registration displaces entries, every removal
+is surfaced with `acp_lifecycle_guard.receipt.evicted` (stale tombstones are
+evicted before any fresh pending entry).
 
 **What enforcement can and cannot guarantee.** The installed host's finalize
 retry accounting (`normalizeBeforeAgentFinalizeResult`) allows exactly
@@ -163,6 +202,18 @@ not claim fail-closed delivery: what it guarantees is that a missing receipt
 is never silent - the exhaustion is logged with
 `acp_lifecycle_guard.receipt.revise_exhausted`, and the guard never records or
 reports a receipt that did not happen.
+
+The guard's own revise counter bounds **requested** rounds. The installed
+host merges finalize results across plugins (another plugin's `finalize`
+decision wins over this guard's `revise`) and acknowledges nothing back to
+handlers, while its own retry accounting charges the per-run,
+per-idempotency-key budget only when a revise decision actually wins the
+merge - that accounting is the authoritative bound on **applied** rounds.
+When another plugin's decision wins, this guard under-requests rather than
+over-revises: it degrades toward finalizing without a receipt (this
+repository's fail-open direction) and the miss still surfaces through the
+exhausted log. The target-build smoke pins both sides of this contract
+against the installed build.
 
 ## What it deliberately does **not** guard
 
@@ -239,11 +290,12 @@ only the live smoke proves end-to-end delivery suppression on a running host.
 
 The guard never logs, persists, or returns raw prompt text, outbound content,
 destinations, message ids, session keys, run ids, or commands. A decision
-produces exactly one log line of the form:
+produces exactly one log line (plus one `receipt.evicted` line when
+bounded-state eviction occurred) of the form:
 
 ```
 [acp-lifecycle-guard] hook=message_sending outcome=cancelled kind=intermediate reason=acp_lifecycle_guard.intermediate.elapsed_drift
-[acp-lifecycle-guard] hook=before_agent_finalize outcome=revise kind=receipt reason=acp_lifecycle_guard.receipt.missing
+[acp-lifecycle-guard] hook=before_agent_finalize outcome=revise kind=receipt reason=acp_lifecycle_guard.receipt.revise_requested
 ```
 
 `cancelReason` is a bare reason code. Hook metadata is limited to
@@ -273,29 +325,50 @@ npm run smoke:target-build
 ```
 
 `npm test` exercises the pure policy functions. The target-build smoke exercises
-the **built** plugin through the **installed** OpenClaw hook runner, and proves
-what a pure-function test cannot: that `dist/index.js` loads against the real
-plugin SDK, that its `register` puts `message_sending`, `before_tool_call`,
-and the four receipt hooks into the registry, that the global runner
-dispatches all of them, that a valid completion carrying seconds passes, that
-a malformed report is cancelled with the expected reason code, that ordinary
-chat passes, and that a non-main ACP launch is blocked with
+the **built** plugin through the **installed** OpenClaw hook runner in phases,
+with the long-established guarantees always first. Phase A runs the **shipped
+default configuration** (no `pluginConfig` at all) end to end: `dist/index.js`
+loads against the real plugin SDK, `register` puts `message_sending`,
+`before_tool_call`, and the four receipt hooks into the registry, the global
+runner dispatches all of them, a valid completion carrying seconds passes, a
+malformed report is cancelled with the expected reason code, ordinary chat
+passes, a non-main ACP launch is blocked with
 `acp_lifecycle_guard.launch.non_main_agent` while a `main` launch and an
-ordinary command pass.
+ordinary command pass, and an eligible checkpoint that misses its receipt is
+**observed, never revised** - proving the shipped observe default.
 
-For the receipt guard it additionally proves, against the installed runner and
-the installed harness finalize helper: an eligible cron checkpoint correlates;
-a failed send followed by an exact-target success is accepted as a receipt
-while a wrong-target success is not; duplicate receipts are idempotent; a
-missing receipt in enforce mode yields the bounded revise result; the host's
-own retry accounting allows exactly the bounded revise rounds and then
-**continues (fails open)**, with the guard logging
-`acp_lifecycle_guard.receipt.revise_exhausted`; `agent_end` cleans state
-deterministically; ordinary and uncorrelatable turns bypass everything; and no
-raw prompt text, outbound content, command text, agent id, or correlation
-identifier reaches a log line, a cancel/block/revise reason, or hook metadata.
-It fails with an explicit message if the installed runner no longer exposes
-the expected dispatch contracts.
+Phase B re-registers with `ownerCheckpointReceiptMode: "enforce"` and proves,
+against the installed runner and the installed harness finalize helper: an
+eligible cron checkpoint correlates on **both** installed context shapes
+(without `jobId`, the embedded-runner shape, and with an inert `jobId`, the
+CLI-runner shape); a failed send followed by an exact-target success is
+accepted as a receipt while a wrong-target success is not; duplicate receipts
+are idempotent; a `message_sent` built by the **installed sent-message
+mappers** (imported from `openclaw/plugin-sdk/hook-runtime`) confirms a
+receipt while pinning the delivery-path contract - no `runId` on either
+projection, `sessionKey` preserved, and the raw wrapper-prefixed `to` passed
+through as `conversationId`; a missing receipt in enforce mode yields the
+bounded revise result; the host's own retry accounting allows exactly the
+bounded revise rounds and then **continues (fails open)**, with the guard
+logging `acp_lifecycle_guard.receipt.revise_exhausted`; a near-miss cron
+marker emits `acp_lifecycle_guard.receipt.marker_drift` without tracking;
+`agent_end` cleans state deterministically; and ordinary and uncorrelatable
+turns bypass everything.
+
+Phase C composes the guard with synthetic second plugins: an earlier
+higher-priority `before_agent_run` block short-circuits and a later
+lower-priority block still wins over the guard's explicit pass (a block is
+never un-stuck); a synthetic plugin's `finalize` decision wins the installed
+merge, discarding the guard's revise request while the guard conservatively
+under-requests and still logs the miss; and the installed finalize budget is
+proven to be charged per run and idempotency key **only when a revise
+decision wins the merge**. Synthetic probes also pin the installed gate's
+nullish normalization (`null` blocks outright; `undefined` survives only an
+incidental merge-layer guard). Throughout, no raw prompt text, outbound
+content, command text, agent id, or correlation identifier reaches a log
+line, a cancel/block/revise reason, or hook metadata. It fails with an
+explicit message if the installed runner no longer exposes the expected
+dispatch contracts.
 
 It is non-invasive: it copies `dist` into a private temp directory, links that
 directory's `node_modules/openclaw` at the installed package, redirects
