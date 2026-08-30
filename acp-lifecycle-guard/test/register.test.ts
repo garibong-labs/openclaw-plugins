@@ -74,7 +74,7 @@ const MALFORMED_INTERMEDIATE = replaceLine(
 );
 
 describe("registerGuard", () => {
-  it("registers every required hook exactly once", () => {
+  it("registers lifecycle and receipt hooks without before_tool_call", () => {
     const { api, registrations } = createFakeApi();
     registerGuard(api);
     const names = registrations.map((entry) => entry.hookName).sort();
@@ -82,7 +82,6 @@ describe("registerGuard", () => {
       "agent_end",
       "before_agent_finalize",
       "before_agent_run",
-      "before_tool_call",
       "message_sending",
       "message_sent",
     ]);

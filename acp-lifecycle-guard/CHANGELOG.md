@@ -4,6 +4,23 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-30
+
+### Fixed
+
+- **Stopped global Codex approval-prompt promotion.** The plugin no longer
+  registers `before_tool_call` on OpenClaw 2026.7.1-2. That host promotes
+  native Codex approval policy for every Codex session whenever any global
+  `before_tool_call` hook exists, so the previous defense-in-depth hook caused
+  ordinary native command and file operations to produce repeated operator
+  approval prompts. `message_sending` remains the authoritative lifecycle
+  report enforcement boundary, and the four owner-checkpoint receipt hooks
+  remain registered.
+- The target-build smoke now proves `before_tool_call` is absent from the
+  global runner. The legacy policy implementation and its configuration keys
+  remain for schema compatibility, but are intentionally inactive in this
+  release.
+
 ## [0.4.0] - 2026-08-30
 
 ### Added

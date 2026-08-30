@@ -45,7 +45,6 @@ export const PLUGIN_ID = "acp-lifecycle-guard";
  * and so this guard sees exactly what would be delivered.
  */
 export const MESSAGE_SENDING_PRIORITY = -50;
-export const BEFORE_TOOL_CALL_PRIORITY = 50;
 /**
  * The receipt hooks are pure observers plus one finalize decision; they do
  * not need to run before or after other plugins' handlers.
@@ -437,9 +436,6 @@ export function createReceiptHookHandlers(
 export function registerGuard(api: GuardHostApi): void {
   api.on("message_sending", createMessageSendingHandler(api), {
     priority: MESSAGE_SENDING_PRIORITY,
-  });
-  api.on("before_tool_call", createBeforeToolCallHandler(api), {
-    priority: BEFORE_TOOL_CALL_PRIORITY,
   });
   const receipt = createReceiptHookHandlers(api);
   api.on("before_agent_run", receipt.beforeAgentRun, {
