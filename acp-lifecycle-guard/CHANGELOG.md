@@ -1,8 +1,24 @@
 # Changelog
 
-All notable changes to `openclaw-acp-report-guard` are documented here. This
+All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.0] - 2026-08-30
+
+### Changed
+
+- **Breaking: identity rename.** The plugin previously published as
+  `openclaw-acp-report-guard` (plugin id `acp-report-guard`, display name
+  "ACP Report Guard", reason-code prefix `acp_report_guard.`) is now
+  `openclaw-acp-lifecycle-guard` with plugin id `acp-lifecycle-guard`,
+  display name "ACP Lifecycle Guard", reason-code prefix
+  `acp_lifecycle_guard.`, and log prefix `[acp-lifecycle-guard]`. Runtime
+  behavior is unchanged from 0.2.0. There is no compatibility alias:
+  installs of the old identity must install the new package, move config to
+  `plugins.entries.acp-lifecycle-guard.config`, and re-key any consumers of
+  the old reason codes or log prefix. Entries below 0.3.0 predate the
+  rename and are shown under the current identity.
 
 ## [0.2.0] - 2026-08-30
 
@@ -16,7 +32,7 @@ plugin is versioned independently of the repository and follows
   after `;`, `&&`, `||`, or `|` - or a session-spawn tool call with
   `runtime: "acp"`, passes only when the hook context `agentId` is exactly
   `main`. A missing, empty, differently cased, or other agent id is blocked
-  with the new stable reason code `acp_report_guard.launch.non_main_agent`.
+  with the new stable reason code `acp_lifecycle_guard.launch.non_main_agent`.
   Recognition fails open: uninspectable commands, ordinary shell commands
   (including ones that merely mention a launcher basename as data, such as a
   `cat`, `rg`, or `echo` argument), unrelated session spawns, and all other
@@ -39,7 +55,7 @@ plugin is versioned independently of the repository and follows
 ### Fixed
 
 - Completion reports using the minute-plus-seconds elapsed form (`17분 31초`)
-  were cancelled with `acp_report_guard.completion.duration_drift`. The
+  were cancelled with `acp_lifecycle_guard.completion.duration_drift`. The
   completion duration grammar now accepts both the minute-only and the
   minute-plus-seconds form, with seconds bounded to `0`-`59`. Malformed
   durations (`17분 60초`, `17분 31`, `17분31초`) still fail, and the metadata

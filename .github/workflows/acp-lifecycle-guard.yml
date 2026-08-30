@@ -1,26 +1,26 @@
-name: acp-report-guard
+name: acp-lifecycle-guard
 
 on:
   push:
     branches: [main]
     paths:
-      - "acp-report-guard/**"
+      - "acp-lifecycle-guard/**"
       - "marketplace.json"
       - "scripts/check-marketplace.mjs"
-      - ".github/workflows/acp-report-guard.yml"
+      - ".github/workflows/acp-lifecycle-guard.yml"
   pull_request:
     paths:
-      - "acp-report-guard/**"
+      - "acp-lifecycle-guard/**"
       - "marketplace.json"
       - "scripts/check-marketplace.mjs"
-      - ".github/workflows/acp-report-guard.yml"
+      - ".github/workflows/acp-lifecycle-guard.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: acp-report-guard-${{ github.ref }}
+  group: acp-lifecycle-guard-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
         node-version: ["22.22.3", "24.15.0", "25.9.0"]
     defaults:
       run:
-        working-directory: acp-report-guard
+        working-directory: acp-lifecycle-guard
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +43,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-          cache-dependency-path: acp-report-guard/package-lock.json
+          cache-dependency-path: acp-lifecycle-guard/package-lock.json
 
       - name: Install (locked)
         run: npm ci

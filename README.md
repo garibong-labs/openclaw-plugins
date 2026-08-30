@@ -7,15 +7,15 @@ root doubles as an OpenClaw remote marketplace.
 
 ## Plugin catalog
 
-| Plugin                       | Directory             | Plugin id           | Version | What it does                                                                          |
-| ---------------------------- | --------------------- | ------------------- | ------- | ------------------------------------------------------------------------------------- |
-| `openclaw-acp-report-guard`  | `acp-report-guard/`   | `acp-report-guard`  | 0.1.0   | Validates canonical ACP lifecycle reports and cancels malformed ones before delivery. |
+| Plugin                         | Directory              | Plugin id             | Version | What it does                                                                                                                       |
+| ------------------------------ | ---------------------- | --------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `openclaw-acp-lifecycle-guard` | `acp-lifecycle-guard/` | `acp-lifecycle-guard` | 0.3.0   | Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and restricts agent-started ACP launch routes to the main agent. |
 
 ## Install from the marketplace
 
 ```bash
 openclaw plugins marketplace list garibong-labs/openclaw-plugins
-openclaw plugins install openclaw-acp-report-guard --marketplace garibong-labs/openclaw-plugins
+openclaw plugins install openclaw-acp-lifecycle-guard --marketplace garibong-labs/openclaw-plugins
 ```
 
 `marketplace.json` at the repository root exposes each plugin through a relative
@@ -33,12 +33,12 @@ marketplace manifest.
 ## Local development
 
 ```bash
-cd acp-report-guard
+cd acp-lifecycle-guard
 npm ci
 npm run check      # typecheck + unit tests + build
 ```
 
-When an OpenClaw install is present locally, `acp-report-guard` can also drive
+When an OpenClaw install is present locally, `acp-lifecycle-guard` can also drive
 its built entry through the installed hook runner. The smoke stages the build in
 a disposable temp directory and installs, enables, and activates nothing:
 
@@ -51,7 +51,7 @@ To exercise a plugin against a local OpenClaw install without copying it into
 the managed plugin root:
 
 ```bash
-openclaw plugins install -l ./acp-report-guard
+openclaw plugins install -l ./acp-lifecycle-guard
 ```
 
 A linked install is still inert until the plugin is explicitly enabled.

@@ -1,7 +1,7 @@
 /**
  * Plugin configuration resolution.
  *
- * Config comes from `plugins.entries.acp-report-guard.config` and is validated
+ * Config comes from `plugins.entries.acp-lifecycle-guard.config` and is validated
  * by the host against `openclaw.plugin.json#configSchema` before it reaches
  * this module. Resolution here is still defensive: unknown or out-of-range
  * values fall back to the canonical defaults rather than disabling the guard.

@@ -1,8 +1,8 @@
 {
-  "id": "acp-report-guard",
-  "name": "ACP Report Guard",
+  "id": "acp-lifecycle-guard",
+  "name": "ACP Lifecycle Guard",
   "description": "Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and restricts agent-started ACP launch routes to the main agent.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "activation": {
     "onStartup": true,
     "onCapabilities": ["hook"]

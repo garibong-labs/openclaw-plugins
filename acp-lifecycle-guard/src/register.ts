@@ -22,7 +22,7 @@ import { evaluateAcpLaunch } from "./policy/launch.ts";
 import { evaluateOutboundContent } from "./policy/outbound.ts";
 import { evaluateToolCall } from "./policy/tool.ts";
 
-export const PLUGIN_ID = "acp-report-guard";
+export const PLUGIN_ID = "acp-lifecycle-guard";
 
 /**
  * Run late so ordinary rewriting hooks have already produced final content,

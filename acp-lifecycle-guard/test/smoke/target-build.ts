@@ -58,7 +58,7 @@ import {
   completionWithDuration,
 } from "../fixtures.ts";
 
-const PLUGIN_ID = "acp-report-guard";
+const PLUGIN_ID = "acp-lifecycle-guard";
 const HOOK_NAME = "message_sending";
 const TOOL_HOOK_NAME = "before_tool_call";
 const UNAUTHORIZED_AGENT_ID = "smoke-helper-agent";
