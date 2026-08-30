@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Target-build smoke: `message_sending` cancellation, `before_tool_call`
- * launch blocking, and the owner-checkpoint receipt hooks.
+ * Target-build smoke: `message_sending` cancellation and the owner-checkpoint
+ * receipt hooks. `before_tool_call` must remain unregistered: on the pinned
+ * host it globally promotes native Codex approvals for every session.
  *
  * The unit suites exercise the pure policy functions. This smoke exercises the
  * *built* plugin through the *installed* OpenClaw hook runner instead, so it
@@ -106,12 +107,10 @@ import {
   RECEIPT_REVISE_INSTRUCTION,
 } from "../../src/receipt/checkpoint.ts";
 import {
-  ACP_LAUNCH_COMMAND,
   CANONICAL_COMPLETION_WITH_SECONDS,
   CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT,
   CHECKPOINT_REPORT_TERMINAL_GREEN,
   ORDINARY_CHAT,
-  ORDINARY_COMMAND,
   OWNER_CHECKPOINT_PROMPT,
   completionWithDuration,
 } from "../fixtures.ts";
@@ -264,8 +263,6 @@ function contentNeedles(): readonly string[] {
     CHECKPOINT_REPORT_TERMINAL_GREEN,
   ].flatMap((report) => report.split("\n"));
   lines.push(
-    ACP_LAUNCH_COMMAND,
-    ORDINARY_COMMAND,
     UNAUTHORIZED_AGENT_ID,
     SMOKE_CHANNEL,
     SMOKE_CONVERSATION,
@@ -295,7 +292,7 @@ async function main(): Promise<void> {
     readFileSync(path.join(openclawRoot, "package.json"), "utf8"),
   ).version as string;
   process.stdout.write(
-    `openclaw ${openclawVersion} (${HOOK_NAME} + ${TOOL_HOOK_NAME} + receipt-hook runner)\n`,
+    `openclaw ${openclawVersion} (${HOOK_NAME} + receipt-hook runner)\n`,
   );
 
   const { workspace, entryUrl } = stageTargetBuild(openclawRoot);
@@ -404,7 +401,7 @@ async function main(): Promise<void> {
 
     // ================= Phase A: shipped default configuration =============
     const defaultRegistration = registerPlugin(undefined);
-    for (const hookName of [HOOK_NAME, TOOL_HOOK_NAME, ...RECEIPT_HOOK_NAMES]) {
+    for (const hookName of [HOOK_NAME, ...RECEIPT_HOOK_NAMES]) {
       const matching = defaultRegistration.typedHooks.filter(
         (hook) => hook.hookName === hookName,
       );
@@ -420,8 +417,8 @@ async function main(): Promise<void> {
     );
     assert.equal(
       pluginRuntime.hasGlobalHooks(TOOL_HOOK_NAME),
-      true,
-      `${TOOL_HOOK_NAME} is visible to the global runner`,
+      false,
+      `${TOOL_HOOK_NAME} must not be registered: its presence promotes Codex approvals globally`,
     );
     for (const hookName of RECEIPT_HOOK_NAMES) {
       assert.equal(
@@ -431,7 +428,6 @@ async function main(): Promise<void> {
       );
     }
     for (const method of [
-      "runBeforeToolCall",
       "runBeforeAgentRun",
       "runMessageSent",
       "runBeforeAgentFinalize",
@@ -460,22 +456,12 @@ async function main(): Promise<void> {
       );
     }
     record(
-      "built entry registers all six hooks and the installed runner + harness + mapper contracts are present",
+      "built entry registers message and receipt hooks only; the installed runner + harness + mapper contracts are present",
     );
 
     const ctx = { channelId: "smoke-channel" };
     const send = (content: string): Promise<unknown> =>
       runner.runMessageSending({ to: "smoke-target", content }, ctx);
-    const callTool = (
-      toolName: string,
-      params: Record<string, unknown>,
-      agentId?: string,
-    ): Promise<unknown> =>
-      runner.runBeforeToolCall(
-        { toolName, params },
-        agentId === undefined ? { toolName } : { toolName, agentId },
-      );
-
     const validCompletion = await send(CANONICAL_COMPLETION_WITH_SECONDS);
     const malformed = (await send(MALFORMED_COMPLETION)) as {
       cancel?: boolean;
@@ -483,26 +469,6 @@ async function main(): Promise<void> {
       metadata?: Record<string, unknown>;
     };
     const chat = await send(ORDINARY_CHAT);
-
-    const mainLaunch = await callTool(
-      "exec",
-      { command: ACP_LAUNCH_COMMAND },
-      "main",
-    );
-    const helperLaunch = (await callTool(
-      "exec",
-      { command: ACP_LAUNCH_COMMAND },
-      UNAUTHORIZED_AGENT_ID,
-    )) as { block?: boolean; blockReason?: string };
-    const contextlessSpawn = (await callTool("sessions_spawn", {
-      runtime: "acp",
-      task: "smoke-example",
-    })) as { block?: boolean; blockReason?: string };
-    const ordinaryCommand = await callTool(
-      "exec",
-      { command: ORDINARY_COMMAND },
-      UNAUTHORIZED_AGENT_ID,
-    );
 
     assert.equal(
       validCompletion,
@@ -529,33 +495,7 @@ async function main(): Promise<void> {
     assert.equal(chat, undefined, "ordinary chat must pass untouched");
     record("ordinary chat passes untouched");
 
-    assert.equal(
-      mainLaunch,
-      undefined,
-      "an ACP launch from the main agent must not be blocked",
-    );
-    assert.equal(
-      helperLaunch?.block,
-      true,
-      "an ACP launch from a non-main agent must be blocked",
-    );
-    assert.ok(
-      helperLaunch.blockReason?.startsWith(ReasonCodes.LaunchNonMainAgent),
-      "block reason must start with the stable launch reason code",
-    );
-    assert.equal(
-      contextlessSpawn?.block,
-      true,
-      "an acp-runtime spawn without a context agent id must be blocked",
-    );
-    assert.equal(
-      ordinaryCommand,
-      undefined,
-      "an ordinary command from a non-main agent must pass untouched",
-    );
-    record(
-      `non-main ACP launches blocked with ${ReasonCodes.LaunchNonMainAgent}; main launch and ordinary command pass`,
-    );
+    record("before_tool_call remains absent, so native Codex approval policy is not globally promoted");
 
     // Shipped-default receipt behavior: observe only, never revise.
     const gatePass = { decision: { outcome: "pass" }, pluginId: PLUGIN_ID };
@@ -1291,8 +1231,6 @@ async function main(): Promise<void> {
     extraEmitted.push(
       malformed.cancelReason ?? "",
       JSON.stringify(malformed.metadata ?? {}),
-      helperLaunch.blockReason ?? "",
-      contextlessSpawn.blockReason ?? "",
       JSON.stringify(wrongTargetFinalize ?? {}),
       JSON.stringify(budgetDecisions),
       JSON.stringify(overrideDecisions),

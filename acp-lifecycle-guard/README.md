@@ -5,9 +5,9 @@ being delivered and tracks **owner-checkpoint delivery receipts**.
 
 - Plugin id: `acp-lifecycle-guard`
 - Package: `openclaw-acp-lifecycle-guard`
-- Hooks: `message_sending` (authoritative), `before_tool_call` (defense in
-  depth), `before_agent_run` / `message_sent` / `before_agent_finalize` /
-  `agent_end` (owner-checkpoint receipt tracking)
+- Hooks: `message_sending` (authoritative), `before_agent_run` /
+  `message_sent` / `before_agent_finalize` / `agent_end` (owner-checkpoint
+  receipt tracking)
 - Runtime dependencies: none
 
 ## Why
@@ -52,40 +52,18 @@ The guard rejects:
 The optional `⚠ **이슈**` section is preserved exactly where the intermediate
 contract permits it: as the trailing section, with one bullet, and nowhere else.
 
-### `before_tool_call` - defense in depth
+### Codex approval compatibility
 
-Two narrow rules run on this hook.
+This plugin intentionally does **not** register `before_tool_call` on
+OpenClaw 2026.7.1-2. That host treats any global `before_tool_call` hook as a
+reason to promote native Codex approval policy for every Codex session, which
+turns ordinary command and file work into repeated operator approval prompts.
+`message_sending` remains the authoritative lifecycle-report enforcement
+boundary, and all four owner-checkpoint receipt hooks remain active.
 
-**Direct intermediate publication.** The disabled watchdog announce path is the
-only normal publisher of ACP intermediate cadence reports. A direct `message`
-tool `send`/`broadcast` that carries an intermediate report bypasses that
-publisher, so it is blocked regardless of whether its layout happens to be
-valid.
-
-**Non-main ACP launches.** Only the OpenClaw agent whose hook context reports
-`agentId` exactly equal to `main` may invoke a recognized agent-started ACP
-launch route. Recognized routes are:
-
-- a shell/exec tool call whose inspectable `command` string invokes one of the
-  canonical launch entrypoints (`acp-host-transport-cli.mjs`,
-  `acpx-foreground-supervisor.mjs`, `claude-acp-launcher.mjs`) in command
-  position - executed directly or as the script argument of `node`, including
-  after `;`, `&&`, `||`, or `|`. A launcher basename that appears only as
-  data (a `cat`, `rg`, or `echo` argument, for example) is not a launch;
-- a session-spawn tool call with `runtime: "acp"`.
-
-A missing, empty, or differently cased context agent id is unauthorized. The
-block reason is the stable code `acp_lifecycle_guard.launch.non_main_agent` plus
-generic wording; command text and agent ids are never echoed. Recognition
-fails open: an uninspectable command, an ordinary shell command, an unrelated
-session spawn, and every other tool call pass through untouched, and
-human-operated actions outside an OpenClaw tool hook are unaffected by
-construction.
-
-Nothing else is blocked: ordinary ACP discussion, approval evidence, status
-answers, start reports, correction-round start reports, completion reports, and
-unrelated messages all pass through. Layout enforcement belongs to
-`message_sending`.
+The legacy `blockDirectIntermediateToolCalls` and
+`blockNonMainAcpLaunches` config keys remain schema-compatible in this release,
+but have no effect while the hook is intentionally unregistered.
 
 ### Owner-checkpoint delivery receipts - completeness, not shape
 
@@ -261,9 +239,9 @@ messages, so the scope is narrow on purpose:
 
 | Key                                | Type    | Default     | Meaning                                                                     |
 | ---------------------------------- | ------- | ----------- | --------------------------------------------------------------------------- |
-| `enforce`                          | boolean | `true`      | Cancel/block on violation. `false` classifies and logs only.                |
-| `blockDirectIntermediateToolCalls` | boolean | `true`      | Block direct message-tool publication of intermediate reports.              |
-| `blockNonMainAcpLaunches`          | boolean | `true`      | Block recognized ACP launch routes when the context agent id is not `main`. |
+| `enforce`                          | boolean | `true`      | Cancel malformed lifecycle reports. `false` classifies and logs only.       |
+| `blockDirectIntermediateToolCalls` | boolean | `true`      | Legacy compatibility key; inactive while `before_tool_call` is unregistered. |
+| `blockNonMainAcpLaunches`          | boolean | `true`      | Legacy compatibility key; inactive while `before_tool_call` is unregistered. |
 | `ownerCheckpointReceiptMode`       | string  | `"observe"` | Owner-checkpoint receipt completeness: `observe` logs, `enforce` revises.   |
 | `maxIntermediateChars`             | integer | `1400`      | Character ceiling for the cadence report (the contract's published cap).    |
 | `maxBoundaryReportChars`           | integer | `2000`      | Character ceiling for start / correction-start / completion reports.        |
@@ -277,15 +255,12 @@ activates receipt enforcement. The receipt guard ships observing only;
 switching it to `enforce` is a separate, deliberate operator rollout after an
 observe-mode soak confirms only genuine misses are logged.
 
-## Host caveat: `before_tool_call` is not the enforcement boundary
+## Host caveat: `message_sending` is the enforcement boundary
 
-`before_tool_call` only sees tool invocations. Outbound lifecycle reports can
-also reach a channel through delivery paths that never pass through a message
-tool call - scheduled announce delivery, reply dispatch, and other host-owned
-outbound routes. A guard built only on `before_tool_call` will therefore appear
-to work in local testing while leaving the real publication path unguarded.
-That is why `message_sending` is treated here as the authoritative final
-safeguard and `before_tool_call` only as defense in depth.
+Outbound lifecycle reports can reach a channel through delivery paths that
+never pass through a message tool call - scheduled announce delivery, reply
+dispatch, and other host-owned outbound routes. `message_sending` is therefore
+the authoritative final safeguard.
 
 Hook availability and cancellation semantics are host-version dependent. Before
 switching this plugin on operationally:
@@ -349,14 +324,13 @@ npm run smoke:target-build
 the **built** plugin through the **installed** OpenClaw hook runner in phases,
 with the long-established guarantees always first. Phase A runs the **shipped
 default configuration** (no `pluginConfig` at all) end to end: `dist/index.js`
-loads against the real plugin SDK, `register` puts `message_sending`,
-`before_tool_call`, and the four receipt hooks into the registry, the global
-runner dispatches all of them, a valid completion carrying seconds passes, a
-malformed report is cancelled with the expected reason code, ordinary chat
-passes, a non-main ACP launch is blocked with
-`acp_lifecycle_guard.launch.non_main_agent` while a `main` launch and an
-ordinary command pass, and an eligible checkpoint that misses its receipt is
-**observed, never revised** - proving the shipped observe default.
+loads against the real plugin SDK, `register` puts `message_sending` and the
+four receipt hooks into the registry, and explicitly keeps `before_tool_call`
+absent to avoid global Codex approval promotion. The global runner dispatches
+the registered hooks; a valid completion carrying seconds passes, a malformed
+report is cancelled with the expected reason code, ordinary chat passes, and an
+eligible checkpoint that misses its receipt is **observed, never revised** -
+proving the shipped observe default.
 
 Phase B re-registers with `ownerCheckpointReceiptMode: "enforce"` and proves,
 against the installed runner and the installed harness finalize helper: an

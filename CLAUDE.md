@@ -56,11 +56,11 @@ Each plugin's `package.json#version` is authoritative; `openclaw.plugin.json#ver
 
 The load-bearing structure, expected of any plugin here:
 
-1. **Pure policy core** — all decision logic lives in pure modules with no host access, no I/O, no logging. In `acp-lifecycle-guard`: `src/policy/*.ts` (one decision function per hook concern: `outbound.ts`, `tool.ts`, `launch.ts`) delegating to `src/lifecycle/*.ts` (classify → normalize → validate against canonical layouts, returning enumerated reason codes from `reason-codes.ts`).
+1. **Pure policy core** — all decision logic lives in pure modules with no host access, no I/O, no logging. In `acp-lifecycle-guard`: `src/policy/*.ts` delegates to `src/lifecycle/*.ts` (classify → normalize → validate against canonical layouts, returning enumerated reason codes from `reason-codes.ts`).
 2. **Thin hook wiring** — `src/register.ts` resolves config, calls the pure policy, translates the decision into the host's hook-result shape (`{cancel, cancelReason}` / `{block, blockReason}`), and emits exactly one content-free log line per decision. `src/index.ts` is just `definePluginEntry`.
 3. **Mirrored host contract** — `openclaw` is an *optional* peer dependency so test/typecheck lanes never download it. `src/host-contract.ts` mirrors the hook types the plugin consumes and `src/types/openclaw-plugin-sdk.d.ts` declares the one SDK subpath imported at runtime. When the host contract changes, update both files together. Imports use focused SDK subpaths (`openclaw/plugin-sdk/<subpath>`), never the deprecated root barrel.
 
-Guard semantics: **fail open on classification** (unrecognized content passes untouched) and **fail closed on validation** (a recognized-but-malformed report is stopped). `message_sending` is the authoritative enforcement boundary (registered at low priority so it sees final content); `before_tool_call` is defense in depth only — outbound content can reach channels without any tool call, so never build enforcement solely on `before_tool_call`.
+Guard semantics: **fail open on classification** (unrecognized content passes untouched) and **fail closed on validation** (a recognized-but-malformed report is stopped). `message_sending` is the authoritative enforcement boundary (registered at low priority so it sees final content). Do not register `before_tool_call` on OpenClaw 2026.7.1-2: it globally promotes native Codex approval policy.
 
 ### Testing conventions
 
