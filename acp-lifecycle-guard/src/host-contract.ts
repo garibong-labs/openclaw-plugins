@@ -44,6 +44,7 @@ export type MessageHookContext = {
   conversationId?: string;
   sessionKey?: string;
   runId?: string;
+  messageId?: string;
 };
 
 /** Mirrors `PluginHookBeforeToolCallEvent`. */
@@ -75,6 +76,93 @@ export type ToolHookContext = {
   channelId?: string;
 };
 
+/** Mirrors `PluginHookAgentContext` (the fields this plugin reads). */
+export type AgentHookContext = {
+  runId?: string;
+  jobId?: string;
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  trigger?: string;
+  /** Channel/plugin id for channel-originated runs, e.g. a messenger name. */
+  channel?: string;
+  messageProvider?: string;
+  /** Conversation target id for channel-originated runs. */
+  channelId?: string;
+  /** Mirrors `channelId` for compatibility. */
+  chatId?: string;
+  senderId?: string;
+};
+
+/** Mirrors `PluginHookBeforeAgentRunEvent`. */
+export type BeforeAgentRunEvent = {
+  prompt: string;
+  messages: unknown[];
+  systemPrompt?: string;
+  accountId?: string;
+  channelId?: string;
+  senderId?: string;
+  senderIsOwner?: boolean;
+};
+
+/**
+ * Mirrors `PluginHookBeforeAgentRunResult` (`InputGateDecision | void`).
+ * This guard only ever passes; the block arm exists to keep the mirror
+ * faithful to the host contract.
+ */
+export type BeforeAgentRunResult =
+  | { outcome: "pass" }
+  | {
+      outcome: "block";
+      reason: string;
+      message?: string;
+      category?: string;
+      metadata?: Record<string, unknown>;
+    }
+  | void;
+
+/** Mirrors `PluginHookMessageSentEvent` (correlation fields only). */
+export type MessageSentEvent = {
+  to: string;
+  content: string;
+  success: boolean;
+  messageId?: string;
+  sessionKey?: string;
+  runId?: string;
+  error?: string;
+};
+
+/** Mirrors `PluginHookBeforeAgentFinalizeEvent` (the fields this plugin reads). */
+export type BeforeAgentFinalizeEvent = {
+  runId?: string;
+  sessionId: string;
+  sessionKey?: string;
+  turnId?: string;
+  stopHookActive: boolean;
+  lastAssistantMessage?: string;
+  messages?: unknown[];
+};
+
+/** Mirrors `PluginHookBeforeAgentFinalizeResult`. */
+export type BeforeAgentFinalizeResult = {
+  action?: "continue" | "revise" | "finalize";
+  reason?: string;
+  retry?: {
+    instruction: string;
+    idempotencyKey?: string;
+    maxAttempts?: number;
+  };
+};
+
+/** Mirrors `PluginHookAgentEndEvent`. */
+export type AgentEndEvent = {
+  runId?: string;
+  messages: unknown[];
+  success: boolean;
+  error?: string;
+  durationMs?: number;
+};
+
 export type MessageSendingHandler = (
   event: MessageSendingEvent,
   ctx: MessageHookContext,
@@ -84,6 +172,26 @@ export type BeforeToolCallHandler = (
   event: BeforeToolCallEvent,
   ctx: ToolHookContext,
 ) => Promise<BeforeToolCallResult | void> | BeforeToolCallResult | void;
+
+export type BeforeAgentRunHandler = (
+  event: BeforeAgentRunEvent,
+  ctx: AgentHookContext,
+) => Promise<BeforeAgentRunResult> | BeforeAgentRunResult;
+
+export type MessageSentHandler = (
+  event: MessageSentEvent,
+  ctx: MessageHookContext,
+) => Promise<void> | void;
+
+export type BeforeAgentFinalizeHandler = (
+  event: BeforeAgentFinalizeEvent,
+  ctx: AgentHookContext,
+) => Promise<BeforeAgentFinalizeResult | void> | BeforeAgentFinalizeResult | void;
+
+export type AgentEndHandler = (
+  event: AgentEndEvent,
+  ctx: AgentHookContext,
+) => Promise<void> | void;
 
 /** Mirrors the `opts` bag accepted by `api.on(...)`. */
 export type GuardHookOptions = {
@@ -101,6 +209,26 @@ export type GuardHookRegistrar = {
   (
     hookName: "before_tool_call",
     handler: BeforeToolCallHandler,
+    opts?: GuardHookOptions,
+  ): void;
+  (
+    hookName: "before_agent_run",
+    handler: BeforeAgentRunHandler,
+    opts?: GuardHookOptions,
+  ): void;
+  (
+    hookName: "message_sent",
+    handler: MessageSentHandler,
+    opts?: GuardHookOptions,
+  ): void;
+  (
+    hookName: "before_agent_finalize",
+    handler: BeforeAgentFinalizeHandler,
+    opts?: GuardHookOptions,
+  ): void;
+  (
+    hookName: "agent_end",
+    handler: AgentEndHandler,
     opts?: GuardHookOptions,
   ): void;
 };

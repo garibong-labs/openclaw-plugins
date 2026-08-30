@@ -4,6 +4,53 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-30
+
+### Added
+
+- **Owner-checkpoint delivery-receipt guard** on `before_agent_run`,
+  `message_sent`, `before_agent_finalize`, and `agent_end`. A run is tracked
+  only when trusted scheduler provenance (hook context `trigger` exactly
+  `cron` plus a cron job id and the host's bounded correlation fields)
+  coincides with the exact first-line prompt marker
+  `[owner-progress-checkpoint:v1]`; the marker alone is never authority, and
+  interactive turns, non-cron runs, and uncorrelatable or ambiguous runs stay
+  untouched. A publication receipt requires a successful send with a
+  non-empty message id, matching run/session correlation, and delivery to the
+  exact original owner conversation derived from trusted hook context (a
+  failed send followed by an exact-target success passes; a wrong-target
+  success does not; duplicates are idempotent). At finalize, a missing
+  receipt is logged with `acp_lifecycle_guard.receipt.missing` in observe
+  mode; enforce mode returns the host's `revise` result with a fixed bounded
+  instruction, a stable idempotency key, and a bounded `maxAttempts`. State
+  is cleaned deterministically on `agent_end` and bounded by a size cap and
+  TTL.
+- Configurable `ownerCheckpointReceiptMode` (`"observe"` | `"enforce"`,
+  default `"observe"`). Deliberately independent of the legacy `enforce`
+  boolean: enabling the shape guards never activates receipt enforcement,
+  which remains a separate operator rollout.
+- New stable reason codes under `acp_lifecycle_guard.receipt.*`
+  (`checkpoint_registered`, `uncorrelatable`, `confirmed`, `target_mismatch`,
+  `missing`, `revise_requested`, `revise_exhausted`).
+- Target-build smoke coverage driving the built plugin through the installed
+  hook runner and the installed harness finalize helper for all four receipt
+  hooks: registration, correlation, receipt acceptance, enforce-mode revise,
+  cleanup, ordinary-turn bypass, and no-raw-content logging.
+
+### Notes
+
+- The installed host's finalize retry accounting allows exactly the bounded
+  revise rounds per run and idempotency key and then **continues**: exhausted
+  retries fail open at the host and the run finalizes without a receipt. The
+  smoke proves this sequence against the installed build. The guard therefore
+  claims no fail-closed delivery guarantee; it guarantees the miss is never
+  silent (`acp_lifecycle_guard.receipt.revise_exhausted` is logged) and is
+  never reported as a confirmed receipt.
+- No raw prompt text, outbound content, destination, message id, session key,
+  run id, or command reaches a log line, a revise reason or instruction, or
+  hook metadata. Correlation identifiers live only in bounded in-memory
+  state.
+
 ## [0.3.0] - 2026-08-30
 
 ### Changed

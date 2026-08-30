@@ -1,11 +1,13 @@
 # openclaw-acp-lifecycle-guard
 
 Native OpenClaw plugin that prevents **malformed ACP lifecycle reports** from
-being delivered.
+being delivered and tracks **owner-checkpoint delivery receipts**.
 
 - Plugin id: `acp-lifecycle-guard`
 - Package: `openclaw-acp-lifecycle-guard`
-- Hooks: `message_sending` (authoritative), `before_tool_call` (defense in depth)
+- Hooks: `message_sending` (authoritative), `before_tool_call` (defense in
+  depth), `before_agent_run` / `message_sent` / `before_agent_finalize` /
+  `agent_end` (owner-checkpoint receipt tracking)
 - Runtime dependencies: none
 
 ## Why
@@ -85,6 +87,61 @@ answers, start reports, correction-round start reports, completion reports, and
 unrelated messages all pass through. Layout enforcement belongs to
 `message_sending`.
 
+### Owner-checkpoint delivery receipts - completeness, not shape
+
+The guards above only see payloads that are actually sent. A scheduler-created
+owner progress checkpoint that runs with `delivery.mode=none` is expected to
+publish its result through an explicit messaging-tool send; when the run
+finishes without ever sending, nothing enters `message_sending`, the run looks
+terminally green, and the missing report is invisible. Four hooks close that
+gap.
+
+**Eligibility (`before_agent_run`).** A run is tracked only when *both* hold:
+
+- trusted scheduler provenance from the hook context - `trigger` exactly
+  `cron` plus a cron job id - and the bounded correlation fields the host
+  exposes there (session key, channel, conversation target id); and
+- the checkpoint prompt's **first line** is exactly the public marker
+  `[owner-progress-checkpoint:v1]`.
+
+The marker alone is never authority: an interactive turn, arbitrary user text
+carrying the marker, a non-cron run, or a run whose context lacks the
+correlation fields is left completely untouched. Two pending runs sharing one
+session key cannot be told apart on the outbound path, so both are dropped
+from tracking (fail open) rather than guessed at.
+
+**Receipt (`message_sent`).** A publication receipt is counted only when the
+send succeeded, carries a non-empty message id, correlates to the tracked run
+(session key, with run-id consistency checked when both sides carry one), and
+was delivered to the **exact original owner conversation** captured from
+trusted hook context at registration - never from free text in the prompt.
+A failed send followed by an exact-target success passes; a success to any
+other destination does not count; duplicate matching events are idempotent.
+
+**Decision (`before_agent_finalize`).** If an eligible checkpoint reaches
+finalize without a receipt:
+
+- `observe` (the default) records the stable, content-free reason code
+  `acp_lifecycle_guard.receipt.missing` and never intervenes;
+- `enforce` returns the host's `revise` result with a fixed bounded
+  instruction requiring one explicit messaging-tool send to the original
+  conversation, a stable idempotency key, and a bounded `maxAttempts`.
+
+**Cleanup (`agent_end`).** State is removed deterministically when the tracked
+run ends. Entries are additionally bounded by a size cap (oldest evicted) and
+a TTL, so abandoned runs cannot leak memory.
+
+**What enforcement can and cannot guarantee.** The installed host's finalize
+retry accounting (`normalizeBeforeAgentFinalizeResult`) allows exactly
+`maxAttempts` revise rounds per run and idempotency key, then turns further
+revise requests into plain continuation: **exhausted retries fail open at the
+host - the run finalizes without a receipt**. The target-build smoke drives
+the installed helper to prove exactly this sequence. The guard therefore does
+not claim fail-closed delivery: what it guarantees is that a missing receipt
+is never silent - the exhaustion is logged with
+`acp_lifecycle_guard.receipt.revise_exhausted`, and the guard never records or
+reports a receipt that did not happen.
+
 ## What it deliberately does **not** guard
 
 Guarding something the contract has not fixed would suppress valid operator
@@ -108,16 +165,23 @@ messages, so the scope is narrow on purpose:
 
 `plugins.entries.acp-lifecycle-guard.config`:
 
-| Key                                | Type    | Default | Meaning                                                                     |
-| ---------------------------------- | ------- | ------- | --------------------------------------------------------------------------- |
-| `enforce`                          | boolean | `true`  | Cancel/block on violation. `false` classifies and logs only.                |
-| `blockDirectIntermediateToolCalls` | boolean | `true`  | Block direct message-tool publication of intermediate reports.              |
-| `blockNonMainAcpLaunches`          | boolean | `true`  | Block recognized ACP launch routes when the context agent id is not `main`. |
-| `maxIntermediateChars`             | integer | `1400`  | Character ceiling for the cadence report (the contract's published cap).    |
-| `maxBoundaryReportChars`           | integer | `2000`  | Character ceiling for start / correction-start / completion reports.        |
+| Key                                | Type    | Default     | Meaning                                                                     |
+| ---------------------------------- | ------- | ----------- | --------------------------------------------------------------------------- |
+| `enforce`                          | boolean | `true`      | Cancel/block on violation. `false` classifies and logs only.                |
+| `blockDirectIntermediateToolCalls` | boolean | `true`      | Block direct message-tool publication of intermediate reports.              |
+| `blockNonMainAcpLaunches`          | boolean | `true`      | Block recognized ACP launch routes when the context agent id is not `main`. |
+| `ownerCheckpointReceiptMode`       | string  | `"observe"` | Owner-checkpoint receipt completeness: `observe` logs, `enforce` revises.   |
+| `maxIntermediateChars`             | integer | `1400`      | Character ceiling for the cadence report (the contract's published cap).    |
+| `maxBoundaryReportChars`           | integer | `2000`      | Character ceiling for start / correction-start / completion reports.        |
 
 Out-of-range or non-integer values fall back to the defaults rather than
 disabling the guard.
+
+`ownerCheckpointReceiptMode` is deliberately **independent of `enforce`**: the
+legacy boolean governs the established shape guards, and turning it on never
+activates receipt enforcement. The receipt guard ships observing only;
+switching it to `enforce` is a separate, deliberate operator rollout after an
+observe-mode soak confirms only genuine misses are logged.
 
 ## Host caveat: `before_tool_call` is not the enforcement boundary
 
@@ -151,17 +215,23 @@ only the live smoke proves end-to-end delivery suppression on a running host.
 
 ## Observability and privacy
 
-The guard never logs, persists, or returns raw outbound content. A decision
+The guard never logs, persists, or returns raw prompt text, outbound content,
+destinations, message ids, session keys, run ids, or commands. A decision
 produces exactly one log line of the form:
 
 ```
 [acp-lifecycle-guard] hook=message_sending outcome=cancelled kind=intermediate reason=acp_lifecycle_guard.intermediate.elapsed_drift
+[acp-lifecycle-guard] hook=before_agent_finalize outcome=revise kind=receipt reason=acp_lifecycle_guard.receipt.missing
 ```
 
 `cancelReason` is a bare reason code. Hook metadata is limited to
-`{ pluginId, lifecycleKind, reasonCode }`. Reason codes are stable, prefixed
-`acp_lifecycle_guard.`, and enumerated in `src/lifecycle/reason-codes.ts`; a unit
-test asserts that no other string shape can be emitted.
+`{ pluginId, lifecycleKind, reasonCode }`. The receipt guard's revise result
+carries only a reason code, the fixed bounded instruction, the stable
+idempotency key, and the numeric attempt bound; correlation identifiers live
+solely in bounded in-memory state and never leave the process. Reason codes
+are stable, prefixed `acp_lifecycle_guard.`, and enumerated in
+`src/lifecycle/reason-codes.ts`; a unit test asserts that no other string
+shape can be emitted.
 
 ## Development
 
@@ -183,15 +253,27 @@ npm run smoke:target-build
 `npm test` exercises the pure policy functions. The target-build smoke exercises
 the **built** plugin through the **installed** OpenClaw hook runner, and proves
 what a pure-function test cannot: that `dist/index.js` loads against the real
-plugin SDK, that its `register` puts `message_sending` and `before_tool_call`
-handlers into the registry, that the global runner dispatches both hooks, that a
-valid completion carrying seconds passes, that a malformed report is cancelled
-with the expected reason code, that ordinary chat passes, that a non-main ACP
-launch is blocked with `acp_lifecycle_guard.launch.non_main_agent` while a `main`
-launch and an ordinary command pass, and that no raw outbound content, command
-text, or agent id reaches a log line, the cancel reason, the block reason, or
-the hook metadata. It fails with an explicit message if the installed runner no
-longer exposes the expected `before_tool_call` dispatch contract.
+plugin SDK, that its `register` puts `message_sending`, `before_tool_call`,
+and the four receipt hooks into the registry, that the global runner
+dispatches all of them, that a valid completion carrying seconds passes, that
+a malformed report is cancelled with the expected reason code, that ordinary
+chat passes, and that a non-main ACP launch is blocked with
+`acp_lifecycle_guard.launch.non_main_agent` while a `main` launch and an
+ordinary command pass.
+
+For the receipt guard it additionally proves, against the installed runner and
+the installed harness finalize helper: an eligible cron checkpoint correlates;
+a failed send followed by an exact-target success is accepted as a receipt
+while a wrong-target success is not; duplicate receipts are idempotent; a
+missing receipt in enforce mode yields the bounded revise result; the host's
+own retry accounting allows exactly the bounded revise rounds and then
+**continues (fails open)**, with the guard logging
+`acp_lifecycle_guard.receipt.revise_exhausted`; `agent_end` cleans state
+deterministically; ordinary and uncorrelatable turns bypass everything; and no
+raw prompt text, outbound content, command text, agent id, or correlation
+identifier reaches a log line, a cancel/block/revise reason, or hook metadata.
+It fails with an explicit message if the installed runner no longer exposes
+the expected dispatch contracts.
 
 It is non-invasive: it copies `dist` into a private temp directory, links that
 directory's `node_modules/openclaw` at the installed package, redirects
@@ -219,6 +301,7 @@ src/
   policy/outbound.ts       message_sending decision (pure)
   policy/tool.ts           before_tool_call report decision (pure)
   policy/launch.ts         before_tool_call ACP launch decision (pure)
+  receipt/checkpoint.ts    owner-checkpoint receipt state + decisions (pure)
   lifecycle/classify.ts    lifecycle candidate classification
   lifecycle/layouts.ts     canonical line layouts
   lifecycle/validate.ts    strict layout validation

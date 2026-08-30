@@ -52,6 +52,21 @@ export const ReasonCodes = {
 
   /** Recognized ACP launch route invoked by an agent other than `main`. */
   LaunchNonMainAgent: `${REASON_CODE_PREFIX}.launch.non_main_agent`,
+
+  /** Eligible owner checkpoint registered for delivery-receipt tracking. */
+  ReceiptCheckpointRegistered: `${REASON_CODE_PREFIX}.receipt.checkpoint_registered`,
+  /** Marker plus provenance matched, but correlation fields were missing or ambiguous. */
+  ReceiptUncorrelatable: `${REASON_CODE_PREFIX}.receipt.uncorrelatable`,
+  /** Exact-destination successful send receipt confirmed. */
+  ReceiptConfirmed: `${REASON_CODE_PREFIX}.receipt.confirmed`,
+  /** Successful send from an eligible checkpoint run to a different destination. */
+  ReceiptTargetMismatch: `${REASON_CODE_PREFIX}.receipt.target_mismatch`,
+  /** Eligible checkpoint reached finalize without a publication receipt. */
+  ReceiptMissing: `${REASON_CODE_PREFIX}.receipt.missing`,
+  /** Enforce mode requested a bounded finalize revise round. */
+  ReceiptReviseRequested: `${REASON_CODE_PREFIX}.receipt.revise_requested`,
+  /** Bounded revise budget spent without a receipt; the host will finalize. */
+  ReceiptReviseExhausted: `${REASON_CODE_PREFIX}.receipt.revise_exhausted`,
 } as const;
 
 export type ReasonCode = (typeof ReasonCodes)[keyof typeof ReasonCodes];

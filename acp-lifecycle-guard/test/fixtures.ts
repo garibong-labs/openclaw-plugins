@@ -138,3 +138,61 @@ export const ACP_LAUNCH_COMMAND =
 
 /** Synthetic shell command with no relation to ACP launch entrypoints. */
 export const ORDINARY_COMMAND = "npm run check";
+
+/**
+ * Synthetic owner progress checkpoint prompt. The first line is the public
+ * marker contract; everything after it is invented.
+ */
+export const OWNER_CHECKPOINT_PROMPT = [
+  "[owner-progress-checkpoint:v1]",
+  "",
+  "예시 진행 점검: 현재 작업 상태를 정리해 원래 대화로 보고하세요.",
+].join("\n");
+
+/** Marker text pasted mid-conversation by an ordinary (untrusted) turn. */
+export const MARKER_IN_ORDINARY_TEXT = OWNER_CHECKPOINT_PROMPT;
+
+/** Prompt whose marker is present but not on the first line. */
+export const CHECKPOINT_PROMPT_MARKER_NOT_FIRST = [
+  "예시 서문",
+  "[owner-progress-checkpoint:v1]",
+].join("\n");
+
+/**
+ * Synthetic checkpoint result reports. The receipt guard is deliberately
+ * content-blind, so one fixture per reported state proves that terminal
+ * green, terminal failure, blocked, and active/pending reports all count the
+ * same once the send itself succeeds to the exact destination.
+ */
+export const CHECKPOINT_REPORT_TERMINAL_GREEN =
+  "✅ 예시 점검 보고: 작업 완료, 검증 통과.";
+export const CHECKPOINT_REPORT_TERMINAL_FAILURE =
+  "❌ 예시 점검 보고: 작업 실패, 오류 1건.";
+export const CHECKPOINT_REPORT_BLOCKED =
+  "⛔ 예시 점검 보고: 승인 대기로 차단됨.";
+export const CHECKPOINT_REPORT_ACTIVE =
+  "🔄 예시 점검 보고: 작업 진행 중, 절반 완료.";
+
+/** Trusted scheduler hook context for an eligible synthetic checkpoint run. */
+export const CHECKPOINT_RUN_CONTEXT = {
+  trigger: "cron",
+  jobId: "example-cron-job-1",
+  runId: "example-run-1",
+  sessionKey: "example-session-key-1",
+  channel: "example-messenger",
+  channelId: "example-conversation-1",
+} as const;
+
+/** The exact-destination delivery context the run above must publish to. */
+export const CHECKPOINT_SEND_CONTEXT = {
+  channelId: "example-messenger",
+  conversationId: "example-conversation-1",
+  sessionKey: "example-session-key-1",
+} as const;
+
+/** A successful delivery somewhere other than the original conversation. */
+export const WRONG_TARGET_SEND_CONTEXT = {
+  channelId: "example-messenger",
+  conversationId: "example-conversation-2",
+  sessionKey: "example-session-key-1",
+} as const;

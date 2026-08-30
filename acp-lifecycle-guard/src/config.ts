@@ -12,6 +12,8 @@ import {
   type ValidationLimits,
 } from "./lifecycle/validate.ts";
 
+import type { ReceiptMode } from "./receipt/checkpoint.ts";
+
 export type GuardConfig = {
   /**
    * When false the guard classifies and logs but never cancels or blocks.
@@ -23,6 +25,14 @@ export type GuardConfig = {
   blockDirectIntermediateToolCalls: boolean;
   /** Defense in depth for ACP launch routes invoked by a non-`main` agent. */
   blockNonMainAcpLaunches: boolean;
+  /**
+   * Owner-checkpoint delivery-receipt completeness mode. Deliberately
+   * independent of `enforce`: the legacy toggle governs the established
+   * report-shape guards, and switching it on must never silently activate
+   * receipt enforcement. Enforcement here is a separate operator rollout;
+   * the default observes and logs only.
+   */
+  ownerCheckpointReceiptMode: ReceiptMode;
   limits: ValidationLimits;
 };
 
@@ -30,6 +40,7 @@ export const DEFAULT_GUARD_CONFIG: GuardConfig = {
   enforce: true,
   blockDirectIntermediateToolCalls: true,
   blockNonMainAcpLaunches: true,
+  ownerCheckpointReceiptMode: "observe",
   limits: DEFAULT_VALIDATION_LIMITS,
 };
 
@@ -38,6 +49,15 @@ const MAX_CHAR_LIMIT = 4000;
 
 function readBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+const RECEIPT_MODES: readonly ReceiptMode[] = ["observe", "enforce"];
+
+function readReceiptMode(value: unknown, fallback: ReceiptMode): ReceiptMode {
+  return typeof value === "string" &&
+    (RECEIPT_MODES as readonly string[]).includes(value)
+    ? (value as ReceiptMode)
+    : fallback;
 }
 
 function readCharLimit(value: unknown, fallback: number): number {
@@ -64,6 +84,10 @@ export function resolveGuardConfig(raw: unknown): GuardConfig {
     blockNonMainAcpLaunches: readBoolean(
       record.blockNonMainAcpLaunches,
       DEFAULT_GUARD_CONFIG.blockNonMainAcpLaunches,
+    ),
+    ownerCheckpointReceiptMode: readReceiptMode(
+      record.ownerCheckpointReceiptMode,
+      DEFAULT_GUARD_CONFIG.ownerCheckpointReceiptMode,
     ),
     limits: {
       maxIntermediateChars: readCharLimit(

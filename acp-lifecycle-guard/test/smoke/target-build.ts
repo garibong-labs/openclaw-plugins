@@ -19,8 +19,18 @@
  *    while the same launch from `main` and an ordinary command pass. The
  *    smoke fails clearly if the installed runner no longer exposes the
  *    expected `before_tool_call` dispatch contract.
- * 6. No raw outbound content, command text, or agent id reaches a log line,
- *    the cancel reason, the block reason, or the hook metadata.
+ * 6. The installed runner dispatches the owner-checkpoint receipt hooks
+ *    (`before_agent_run`, `message_sent`, `before_agent_finalize`,
+ *    `agent_end`): an eligible cron checkpoint correlates, an exact-target
+ *    send receipt is accepted (a failed send and a wrong-target success are
+ *    not), a missing receipt yields the bounded enforce-mode revise result,
+ *    the *installed* finalize retry accounting turns exhausted revise rounds
+ *    into plain continuation (proving the host fails open there - the guard
+ *    logs the exhaustion instead of claiming delivery), cleanup on
+ *    `agent_end` is deterministic, and ordinary turns bypass everything.
+ * 7. No raw outbound content, prompt text, command text, agent id, or
+ *    correlation identifier reaches a log line, the cancel reason, the block
+ *    reason, a revise reason, or the hook metadata.
  *
  * It is deliberately non-invasive. It never installs, enables, or activates the
  * plugin, never reads or writes OpenClaw config, and never contacts Gateway.
@@ -51,17 +61,58 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ReasonCodes } from "../../src/lifecycle/reason-codes.ts";
 import {
+  MAX_RECEIPT_REVISE_ATTEMPTS,
+  RECEIPT_REVISE_INSTRUCTION,
+} from "../../src/receipt/checkpoint.ts";
+import {
   ACP_LAUNCH_COMMAND,
   CANONICAL_COMPLETION_WITH_SECONDS,
+  CHECKPOINT_REPORT_TERMINAL_GREEN,
   ORDINARY_CHAT,
   ORDINARY_COMMAND,
+  OWNER_CHECKPOINT_PROMPT,
   completionWithDuration,
 } from "../fixtures.ts";
 
 const PLUGIN_ID = "acp-lifecycle-guard";
 const HOOK_NAME = "message_sending";
 const TOOL_HOOK_NAME = "before_tool_call";
+const RECEIPT_HOOK_NAMES = [
+  "before_agent_run",
+  "message_sent",
+  "before_agent_finalize",
+  "agent_end",
+] as const;
 const UNAUTHORIZED_AGENT_ID = "smoke-helper-agent";
+
+/** Synthetic correlation values for the receipt scenarios. */
+const SMOKE_CHANNEL = "smoke-messenger";
+const SMOKE_CONVERSATION = "smoke-conversation-1";
+const SMOKE_WRONG_CONVERSATION = "smoke-conversation-2";
+const SMOKE_JOB_ID = "smoke-cron-job-1";
+const SMOKE_MESSAGE_ID = "smoke-message-1";
+
+/** One trusted cron agent-hook context per receipt scenario. */
+function cronRunContext(scenario: string): Record<string, unknown> {
+  return {
+    trigger: "cron",
+    jobId: SMOKE_JOB_ID,
+    runId: `smoke-run-${scenario}`,
+    sessionKey: `smoke-session-${scenario}`,
+    sessionId: `smoke-session-id-${scenario}`,
+    channel: SMOKE_CHANNEL,
+    channelId: SMOKE_CONVERSATION,
+  };
+}
+
+function finalizeEvent(scenario: string): Record<string, unknown> {
+  return {
+    runId: `smoke-run-${scenario}`,
+    sessionId: `smoke-session-id-${scenario}`,
+    sessionKey: `smoke-session-${scenario}`,
+    stopHookActive: false,
+  };
+}
 const PLUGIN_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -138,8 +189,29 @@ function contentNeedles(): readonly string[] {
     CANONICAL_COMPLETION_WITH_SECONDS,
     MALFORMED_COMPLETION,
     ORDINARY_CHAT,
+    OWNER_CHECKPOINT_PROMPT,
+    CHECKPOINT_REPORT_TERMINAL_GREEN,
   ].flatMap((report) => report.split("\n"));
-  lines.push(ACP_LAUNCH_COMMAND, ORDINARY_COMMAND, UNAUTHORIZED_AGENT_ID);
+  lines.push(
+    ACP_LAUNCH_COMMAND,
+    ORDINARY_COMMAND,
+    UNAUTHORIZED_AGENT_ID,
+    SMOKE_CHANNEL,
+    SMOKE_CONVERSATION,
+    SMOKE_WRONG_CONVERSATION,
+    SMOKE_JOB_ID,
+    SMOKE_MESSAGE_ID,
+  );
+  for (const scenario of ["happy", "revise", "budget", "wrong", "cleanup"]) {
+    lines.push(
+      `smoke-run-${scenario}`,
+      `smoke-session-${scenario}`,
+      `smoke-session-id-${scenario}`,
+    );
+  }
+  // The checkpoint marker is a public contract constant, but it still has no
+  // business inside a log line, reason, or metadata value.
+  lines.push("[owner-progress-checkpoint:v1]");
   return [...new Set(lines.filter((line) => line.trim().length > 0))];
 }
 
@@ -162,6 +234,14 @@ async function main(): Promise<void> {
   const pluginRuntime = await import(
     pathToFileURL(
       requireFromWorkspace.resolve("openclaw/plugin-sdk/plugin-runtime"),
+    ).href
+  );
+  // The agent-harness runtime owns the before_agent_finalize retry budget
+  // (`normalizeBeforeAgentFinalizeResult`); the smoke drives it directly to
+  // prove what the host does once bounded revise rounds are exhausted.
+  const agentHarness = await import(
+    pathToFileURL(
+      requireFromWorkspace.resolve("openclaw/plugin-sdk/agent-harness"),
     ).href
   );
 
@@ -193,6 +273,9 @@ async function main(): Promise<void> {
         warn: logAt("warn"),
         error: logAt("error"),
       },
+      // Enforce receipt mode so the smoke can prove the revise contract; the
+      // shipped default stays observe-only.
+      pluginConfig: { ownerCheckpointReceiptMode: "enforce" },
       on: (
         hookName: string,
         handler: unknown,
@@ -208,19 +291,13 @@ async function main(): Promise<void> {
       },
     });
 
-    const messageSending = typedHooks.filter(
-      (hook) => hook.hookName === HOOK_NAME,
+    for (const hookName of [HOOK_NAME, TOOL_HOOK_NAME, ...RECEIPT_HOOK_NAMES]) {
+      const matching = typedHooks.filter((hook) => hook.hookName === hookName);
+      assert.equal(matching.length, 1, `exactly one ${hookName} handler`);
+    }
+    record(
+      `built entry registers ${HOOK_NAME}, ${TOOL_HOOK_NAME}, and the four receipt hooks`,
     );
-    assert.equal(messageSending.length, 1, `exactly one ${HOOK_NAME} handler`);
-    const beforeToolCall = typedHooks.filter(
-      (hook) => hook.hookName === TOOL_HOOK_NAME,
-    );
-    assert.equal(
-      beforeToolCall.length,
-      1,
-      `exactly one ${TOOL_HOOK_NAME} handler`,
-    );
-    record(`built entry registers ${HOOK_NAME} and ${TOOL_HOOK_NAME}`);
 
     pluginRuntime.initializeGlobalHookRunner({
       hooks: [],
@@ -244,8 +321,32 @@ async function main(): Promise<void> {
       "function",
       `installed OpenClaw hook runner does not expose runBeforeToolCall; the host ${TOOL_HOOK_NAME} contract changed - update this smoke and src/host-contract.ts together`,
     );
+    for (const hookName of RECEIPT_HOOK_NAMES) {
+      assert.equal(
+        pluginRuntime.hasGlobalHooks(hookName),
+        true,
+        `${hookName} is visible to the global runner`,
+      );
+    }
+    for (const method of [
+      "runBeforeAgentRun",
+      "runMessageSent",
+      "runBeforeAgentFinalize",
+      "runAgentEnd",
+    ]) {
+      assert.equal(
+        typeof runner[method],
+        "function",
+        `installed OpenClaw hook runner does not expose ${method}; the host receipt-hook contract changed - update this smoke and src/host-contract.ts together`,
+      );
+    }
+    assert.equal(
+      typeof agentHarness.runAgentHarnessBeforeAgentFinalizeHook,
+      "function",
+      "installed OpenClaw no longer exposes the harness finalize helper; re-verify the revise retry-budget contract before trusting enforcement",
+    );
     record(
-      `installed runner dispatches ${HOOK_NAME} and ${TOOL_HOOK_NAME} to the built plugin`,
+      `installed runner dispatches ${HOOK_NAME}, ${TOOL_HOOK_NAME}, and the receipt hooks to the built plugin`,
     );
 
     const ctx = { channelId: "smoke-channel" };
@@ -298,6 +399,118 @@ async function main(): Promise<void> {
       { command: ORDINARY_COMMAND },
       UNAUTHORIZED_AGENT_ID,
     );
+
+    // --- Owner-checkpoint receipt scenarios -------------------------------
+    const startCheckpoint = (scenario: string): Promise<unknown> =>
+      runner.runBeforeAgentRun(
+        { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+        cronRunContext(scenario),
+      );
+    const sendCheckpointReport = (
+      scenario: string,
+      opts?: { success?: boolean; conversation?: string; messageId?: string },
+    ): Promise<unknown> =>
+      runner.runMessageSent(
+        {
+          to: opts?.conversation ?? SMOKE_CONVERSATION,
+          content: CHECKPOINT_REPORT_TERMINAL_GREEN,
+          success: opts?.success ?? true,
+          ...(opts?.messageId === undefined
+            ? { messageId: SMOKE_MESSAGE_ID }
+            : opts.messageId.length > 0
+              ? { messageId: opts.messageId }
+              : {}),
+        },
+        {
+          channelId: SMOKE_CHANNEL,
+          conversationId: opts?.conversation ?? SMOKE_CONVERSATION,
+          sessionKey: `smoke-session-${scenario}`,
+        },
+      );
+    const finalizeCheckpoint = (scenario: string): Promise<unknown> =>
+      runner.runBeforeAgentFinalize(
+        finalizeEvent(scenario),
+        cronRunContext(scenario),
+      );
+    const endCheckpoint = (scenario: string): Promise<void> =>
+      runner.runAgentEnd(
+        {
+          runId: `smoke-run-${scenario}`,
+          messages: [],
+          success: true,
+        },
+        cronRunContext(scenario),
+      );
+
+    // Happy path: eligible cron checkpoint, exact-target receipt, untouched
+    // finalize, deterministic cleanup. Duplicate receipts must be idempotent.
+    await startCheckpoint("happy");
+    await sendCheckpointReport("happy", { success: false });
+    await sendCheckpointReport("happy");
+    await sendCheckpointReport("happy");
+    const happyFinalize = await finalizeCheckpoint("happy");
+    await endCheckpoint("happy");
+    const happyAfterEnd = await finalizeCheckpoint("happy");
+
+    // Wrong-target success must not count; enforce mode revises, and a later
+    // exact-target receipt satisfies the guard.
+    await startCheckpoint("wrong");
+    await sendCheckpointReport("wrong", {
+      conversation: SMOKE_WRONG_CONVERSATION,
+    });
+    const wrongTargetFinalize = (await finalizeCheckpoint("wrong")) as {
+      action?: string;
+      reason?: string;
+      retry?: {
+        instruction?: string;
+        idempotencyKey?: string;
+        maxAttempts?: number;
+      };
+    };
+    await sendCheckpointReport("wrong");
+    const wrongAfterReceipt = await finalizeCheckpoint("wrong");
+    await endCheckpoint("wrong");
+
+    // Exhausted revise budget: drive the *installed* harness finalize helper,
+    // which owns the host-side retry accounting.
+    await startCheckpoint("budget");
+    const budgetDecisions: Array<{ action?: string; reason?: string }> = [];
+    for (
+      let round = 0;
+      round < MAX_RECEIPT_REVISE_ATTEMPTS + 1;
+      round += 1
+    ) {
+      budgetDecisions.push(
+        await agentHarness.runAgentHarnessBeforeAgentFinalizeHook({
+          event: finalizeEvent("budget"),
+          ctx: cronRunContext("budget"),
+          hookRunner: runner,
+        }),
+      );
+    }
+    await endCheckpoint("budget");
+
+    // Ordinary turns bypass the guard: the marker without cron provenance,
+    // and a cron context without correlation fields, are both untouched.
+    const ordinaryRunCtx = {
+      trigger: "user",
+      sessionKey: "smoke-session-cleanup",
+    };
+    await runner.runBeforeAgentRun(
+      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+      ordinaryRunCtx,
+    );
+    const ordinaryFinalize = await runner.runBeforeAgentFinalize(
+      finalizeEvent("cleanup"),
+      ordinaryRunCtx,
+    );
+    const { channelId: _omitted, ...uncorrelatable } =
+      cronRunContext("cleanup");
+    await runner.runBeforeAgentRun(
+      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+      uncorrelatable,
+    );
+    const uncorrelatableFinalize = await finalizeCheckpoint("cleanup");
 
     process.stdout.write = realStdoutWrite;
     process.stderr.write = realStderrWrite;
@@ -359,6 +572,91 @@ async function main(): Promise<void> {
     );
     record("ordinary command from a non-main agent passes untouched");
 
+    assert.equal(
+      happyFinalize,
+      undefined,
+      "a checkpoint with an exact-target receipt must finalize untouched",
+    );
+    assert.equal(
+      happyAfterEnd,
+      undefined,
+      "agent_end must clean the entry so later finalizes stay untouched",
+    );
+    record(
+      "eligible checkpoint correlates through the installed runner; failed send then exact-target receipt passes; duplicates are idempotent; agent_end cleans up",
+    );
+
+    assert.equal(
+      wrongTargetFinalize?.action,
+      "revise",
+      "a wrong-target success must not count as a receipt in enforce mode",
+    );
+    assert.equal(wrongTargetFinalize.reason, ReasonCodes.ReceiptMissing);
+    assert.equal(
+      wrongTargetFinalize.retry?.instruction,
+      RECEIPT_REVISE_INSTRUCTION,
+      "the revise instruction must be the fixed bounded text",
+    );
+    assert.equal(
+      wrongTargetFinalize.retry?.maxAttempts,
+      MAX_RECEIPT_REVISE_ATTEMPTS,
+    );
+    assert.ok(
+      wrongTargetFinalize.retry?.idempotencyKey?.startsWith(
+        "acp_lifecycle_guard.",
+      ),
+      "the revise idempotency key must be the stable prefixed constant",
+    );
+    assert.equal(
+      wrongAfterReceipt,
+      undefined,
+      "an exact-target receipt after a revise must satisfy the guard",
+    );
+    record(
+      `missing receipt yields the bounded revise result with ${ReasonCodes.ReceiptMissing}`,
+    );
+
+    assert.deepEqual(
+      budgetDecisions.map((decision) => decision?.action),
+      [
+        ...Array.from(
+          { length: MAX_RECEIPT_REVISE_ATTEMPTS },
+          () => "revise",
+        ),
+        "continue",
+      ],
+      "the installed finalize retry accounting must allow exactly the bounded revise rounds and then continue",
+    );
+    // The host fails open after the budget: the run finalizes without a
+    // receipt. The guard's warn log is the only trace, so it must exist.
+    const exhaustedLogs = logs.filter((entry) =>
+      entry.args.some(
+        (arg) =>
+          typeof arg === "string" &&
+          arg.includes(ReasonCodes.ReceiptReviseExhausted),
+      ),
+    );
+    assert.equal(
+      exhaustedLogs.length,
+      1,
+      "exhausted revise budget must be recorded with the stable reason code",
+    );
+    record(
+      "installed host continues after the bounded revise budget (fail-open) and the guard records the exhaustion loudly",
+    );
+
+    assert.equal(
+      ordinaryFinalize,
+      undefined,
+      "an ordinary turn carrying the marker must stay untouched",
+    );
+    assert.equal(
+      uncorrelatableFinalize,
+      undefined,
+      "a checkpoint without correlation fields must stay untouched",
+    );
+    record("ordinary and uncorrelatable turns bypass the receipt guard");
+
     const emitted = [
       ...logs.map((entry) => `${entry.level} ${entry.args.map(String).join(" ")}`),
       ...stdout,
@@ -367,6 +665,8 @@ async function main(): Promise<void> {
       JSON.stringify(malformed.metadata ?? {}),
       helperLaunch.blockReason ?? "",
       contextlessSpawn.blockReason ?? "",
+      JSON.stringify(wrongTargetFinalize ?? {}),
+      JSON.stringify(budgetDecisions),
     ].join("\n");
     for (const needle of contentNeedles()) {
       assert.equal(
