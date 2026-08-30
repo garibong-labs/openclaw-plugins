@@ -1,11 +1,11 @@
 {
   "name": "garibong-labs",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "plugins": [
     {
       "name": "openclaw-acp-report-guard",
-      "version": "0.1.0",
-      "description": "Validates canonical ACP lifecycle reports and cancels malformed ones before delivery.",
+      "version": "0.2.0",
+      "description": "Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and restricts agent-started ACP launch routes to the main agent.",
       "source": "./acp-report-guard"
     }
   ]

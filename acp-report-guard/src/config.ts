@@ -21,12 +21,15 @@ export type GuardConfig = {
   enforce: boolean;
   /** Defense in depth for direct message-tool publication of cadence reports. */
   blockDirectIntermediateToolCalls: boolean;
+  /** Defense in depth for ACP launch routes invoked by a non-`main` agent. */
+  blockNonMainAcpLaunches: boolean;
   limits: ValidationLimits;
 };
 
 export const DEFAULT_GUARD_CONFIG: GuardConfig = {
   enforce: true,
   blockDirectIntermediateToolCalls: true,
+  blockNonMainAcpLaunches: true,
   limits: DEFAULT_VALIDATION_LIMITS,
 };
 
@@ -57,6 +60,10 @@ export function resolveGuardConfig(raw: unknown): GuardConfig {
     blockDirectIntermediateToolCalls: readBoolean(
       record.blockDirectIntermediateToolCalls,
       DEFAULT_GUARD_CONFIG.blockDirectIntermediateToolCalls,
+    ),
+    blockNonMainAcpLaunches: readBoolean(
+      record.blockNonMainAcpLaunches,
+      DEFAULT_GUARD_CONFIG.blockNonMainAcpLaunches,
     ),
     limits: {
       maxIntermediateChars: readCharLimit(

@@ -18,6 +18,7 @@ import type {
   MessageSendingResult,
   ToolHookContext,
 } from "./host-contract.ts";
+import { evaluateAcpLaunch } from "./policy/launch.ts";
 import { evaluateOutboundContent } from "./policy/outbound.ts";
 import { evaluateToolCall } from "./policy/tool.ts";
 
@@ -98,12 +99,44 @@ export function createBeforeToolCallHandler(
   event: BeforeToolCallEvent,
   ctx?: ToolHookContext,
 ) => BeforeToolCallResult | void {
-  return (event: BeforeToolCallEvent): BeforeToolCallResult | void => {
+  return (
+    event: BeforeToolCallEvent,
+    ctx?: ToolHookContext,
+  ): BeforeToolCallResult | void => {
     const config = overrideConfig ?? resolveGuardConfig(api.pluginConfig);
     const params =
       event.params !== null && typeof event.params === "object"
         ? event.params
         : {};
+
+    const launchDecision = evaluateAcpLaunch(
+      { toolName: event.toolName, params },
+      { agentId: ctx?.agentId },
+      config,
+    );
+
+    if (launchDecision.action === "block") {
+      logDecision(api.logger, "warn", {
+        hook: "before_tool_call",
+        outcome: "blocked",
+        kind: "launch",
+        reason: launchDecision.reasonCode,
+      });
+      return {
+        block: true,
+        blockReason: `${launchDecision.reasonCode}: ACP launch routes may only be invoked by the main OpenClaw agent.`,
+      };
+    }
+
+    if (launchDecision.action === "observe") {
+      logDecision(api.logger, "info", {
+        hook: "before_tool_call",
+        outcome: "observed",
+        kind: "launch",
+        reason: launchDecision.reasonCode,
+      });
+    }
+
     const decision = evaluateToolCall(
       { toolName: event.toolName, params },
       config,

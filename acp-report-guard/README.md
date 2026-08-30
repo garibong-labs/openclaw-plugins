@@ -52,10 +52,33 @@ contract permits it: as the trailing section, with one bullet, and nowhere else.
 
 ### `before_tool_call` - defense in depth
 
-The disabled watchdog announce path is the only normal publisher of ACP
-intermediate cadence reports. A direct `message` tool `send`/`broadcast` that
-carries an intermediate report bypasses that publisher, so it is blocked
-regardless of whether its layout happens to be valid.
+Two narrow rules run on this hook.
+
+**Direct intermediate publication.** The disabled watchdog announce path is the
+only normal publisher of ACP intermediate cadence reports. A direct `message`
+tool `send`/`broadcast` that carries an intermediate report bypasses that
+publisher, so it is blocked regardless of whether its layout happens to be
+valid.
+
+**Non-main ACP launches.** Only the OpenClaw agent whose hook context reports
+`agentId` exactly equal to `main` may invoke a recognized agent-started ACP
+launch route. Recognized routes are:
+
+- a shell/exec tool call whose inspectable `command` string invokes one of the
+  canonical launch entrypoints (`acp-host-transport-cli.mjs`,
+  `acpx-foreground-supervisor.mjs`, `claude-acp-launcher.mjs`) in command
+  position - executed directly or as the script argument of `node`, including
+  after `;`, `&&`, `||`, or `|`. A launcher basename that appears only as
+  data (a `cat`, `rg`, or `echo` argument, for example) is not a launch;
+- a session-spawn tool call with `runtime: "acp"`.
+
+A missing, empty, or differently cased context agent id is unauthorized. The
+block reason is the stable code `acp_report_guard.launch.non_main_agent` plus
+generic wording; command text and agent ids are never echoed. Recognition
+fails open: an uninspectable command, an ordinary shell command, an unrelated
+session spawn, and every other tool call pass through untouched, and
+human-operated actions outside an OpenClaw tool hook are unaffected by
+construction.
 
 Nothing else is blocked: ordinary ACP discussion, approval evidence, status
 answers, start reports, correction-round start reports, completion reports, and
@@ -89,6 +112,7 @@ messages, so the scope is narrow on purpose:
 | ---------------------------------- | ------- | ------- | --------------------------------------------------------------------------- |
 | `enforce`                          | boolean | `true`  | Cancel/block on violation. `false` classifies and logs only.                |
 | `blockDirectIntermediateToolCalls` | boolean | `true`  | Block direct message-tool publication of intermediate reports.              |
+| `blockNonMainAcpLaunches`          | boolean | `true`  | Block recognized ACP launch routes when the context agent id is not `main`. |
 | `maxIntermediateChars`             | integer | `1400`  | Character ceiling for the cadence report (the contract's published cap).    |
 | `maxBoundaryReportChars`           | integer | `2000`  | Character ceiling for start / correction-start / completion reports.        |
 
@@ -159,11 +183,15 @@ npm run smoke:target-build
 `npm test` exercises the pure policy functions. The target-build smoke exercises
 the **built** plugin through the **installed** OpenClaw hook runner, and proves
 what a pure-function test cannot: that `dist/index.js` loads against the real
-plugin SDK, that its `register` puts a `message_sending` handler into the
-registry, that the global runner dispatches to it, that a valid completion
-carrying seconds passes, that a malformed report is cancelled with the expected
-reason code, that ordinary chat passes, and that no raw outbound content reaches
-a log line, the cancel reason, or the hook metadata.
+plugin SDK, that its `register` puts `message_sending` and `before_tool_call`
+handlers into the registry, that the global runner dispatches both hooks, that a
+valid completion carrying seconds passes, that a malformed report is cancelled
+with the expected reason code, that ordinary chat passes, that a non-main ACP
+launch is blocked with `acp_report_guard.launch.non_main_agent` while a `main`
+launch and an ordinary command pass, and that no raw outbound content, command
+text, or agent id reaches a log line, the cancel reason, the block reason, or
+the hook metadata. It fails with an explicit message if the installed runner no
+longer exposes the expected `before_tool_call` dispatch contract.
 
 It is non-invasive: it copies `dist` into a private temp directory, links that
 directory's `node_modules/openclaw` at the installed package, redirects
@@ -189,7 +217,8 @@ src/
   config.ts                config resolution
   host-contract.ts         mirrored host hook types
   policy/outbound.ts       message_sending decision (pure)
-  policy/tool.ts           before_tool_call decision (pure)
+  policy/tool.ts           before_tool_call report decision (pure)
+  policy/launch.ts         before_tool_call ACP launch decision (pure)
   lifecycle/classify.ts    lifecycle candidate classification
   lifecycle/layouts.ts     canonical line layouts
   lifecycle/validate.ts    strict layout validation

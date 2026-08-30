@@ -6,6 +6,6 @@ export default definePluginEntry({
   id: PLUGIN_ID,
   name: "ACP Report Guard",
   description:
-    "Validates canonical ACP lifecycle reports and cancels malformed ones before delivery.",
+    "Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and restricts agent-started ACP launch routes to the main agent.",
   register: registerGuard,
 });

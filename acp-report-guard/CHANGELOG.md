@@ -4,7 +4,37 @@ All notable changes to `openclaw-acp-report-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-30
+
+### Added
+
+- `before_tool_call` now also guards agent-started ACP launch routes as
+  defense in depth: a shell/exec tool call whose inspectable command invokes a
+  canonical ACP launch entrypoint (`acp-host-transport-cli.mjs`,
+  `acpx-foreground-supervisor.mjs`, `claude-acp-launcher.mjs`) in command
+  position - executed directly or as the script argument of `node`, including
+  after `;`, `&&`, `||`, or `|` - or a session-spawn tool call with
+  `runtime: "acp"`, passes only when the hook context `agentId` is exactly
+  `main`. A missing, empty, differently cased, or other agent id is blocked
+  with the new stable reason code `acp_report_guard.launch.non_main_agent`.
+  Recognition fails open: uninspectable commands, ordinary shell commands
+  (including ones that merely mention a launcher basename as data, such as a
+  `cat`, `rg`, or `echo` argument), unrelated session spawns, and all other
+  tool calls pass through untouched, and actions outside an OpenClaw tool
+  hook are unaffected.
+- Configurable `blockNonMainAcpLaunches` (default `true`). With `enforce`
+  false, or with this toggle off, non-main launches are observed and logged
+  but never blocked.
+- `npm run smoke:target-build`: a disposable target-build smoke that drives the
+  built plugin through the installed OpenClaw hook runner and asserts
+  `message_sending` and `before_tool_call` registration and dispatch, a passing
+  completion with seconds, a cancelled malformed report, passing ordinary chat,
+  a blocked non-main ACP launch alongside a passing `main` launch and ordinary
+  command, and no raw outbound content, command text, or agent id in logs, the
+  cancel reason, the block reason, or hook metadata. It fails clearly if the
+  installed runner no longer exposes the expected `before_tool_call` dispatch
+  contract. It does not install, enable, or activate the plugin, does not touch
+  OpenClaw config, and does not contact Gateway.
 
 ### Fixed
 
@@ -14,15 +44,6 @@ plugin is versioned independently of the repository and follows
   minute-plus-seconds form, with seconds bounded to `0`-`59`. Malformed
   durations (`17분 60초`, `17분 31`, `17분31초`) still fail, and the metadata
   line and round grammar are unchanged.
-
-### Added
-
-- `npm run smoke:target-build`: a disposable target-build smoke that drives the
-  built plugin through the installed OpenClaw hook runner and asserts
-  `message_sending` registration, a passing completion with seconds, a cancelled
-  malformed report, passing ordinary chat, and no raw outbound content in logs,
-  the cancel reason, or hook metadata. It does not install, enable, or activate
-  the plugin, does not touch OpenClaw config, and does not contact Gateway.
 
 ## [0.1.0] - 2026-08-29
 

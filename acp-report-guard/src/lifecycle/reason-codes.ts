@@ -49,6 +49,9 @@ export const ReasonCodes = {
 
   /** Direct message-tool publication of an ACP intermediate report. */
   ToolDirectIntermediate: `${REASON_CODE_PREFIX}.tool.direct_intermediate_blocked`,
+
+  /** Recognized ACP launch route invoked by an agent other than `main`. */
+  LaunchNonMainAgent: `${REASON_CODE_PREFIX}.launch.non_main_agent`,
 } as const;
 
 export type ReasonCode = (typeof ReasonCodes)[keyof typeof ReasonCodes];

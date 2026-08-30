@@ -131,3 +131,10 @@ export function completionWithDuration(duration: string): string {
 /** Completion report in the minute-plus-seconds form production emits. */
 export const CANONICAL_COMPLETION_WITH_SECONDS =
   completionWithDuration("17분 31초");
+
+/** Synthetic shell command that invokes a canonical ACP launch entrypoint. */
+export const ACP_LAUNCH_COMMAND =
+  "node ./example-tools/acp-host-transport-cli.mjs --example-flag";
+
+/** Synthetic shell command with no relation to ACP launch entrypoints. */
+export const ORDINARY_COMMAND = "npm run check";

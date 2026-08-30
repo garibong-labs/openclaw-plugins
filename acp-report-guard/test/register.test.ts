@@ -16,9 +16,11 @@ import {
   registerGuard,
 } from "../src/register.ts";
 import {
+  ACP_LAUNCH_COMMAND,
   CANONICAL_COMPLETION,
   CANONICAL_INTERMEDIATE,
   ORDINARY_CHAT,
+  ORDINARY_COMMAND,
   replaceLine,
 } from "./fixtures.ts";
 
@@ -203,6 +205,77 @@ describe("before_tool_call handler", () => {
       undefined,
     );
   });
+
+  it("passes an ACP launch from the main agent", () => {
+    const { api, logs } = createFakeApi();
+    const handler = createBeforeToolCallHandler(api, DEFAULT_GUARD_CONFIG);
+    assert.equal(
+      handler(
+        { toolName: "exec", params: { command: ACP_LAUNCH_COMMAND } },
+        { toolName: "exec", agentId: "main" },
+      ),
+      undefined,
+    );
+    assert.equal(logs.length, 0);
+  });
+
+  it("blocks an ACP launch from another agent with the stable reason code", () => {
+    const { api } = createFakeApi();
+    const handler = createBeforeToolCallHandler(api, DEFAULT_GUARD_CONFIG);
+    const result = handler(
+      { toolName: "exec", params: { command: ACP_LAUNCH_COMMAND } },
+      { toolName: "exec", agentId: "example-helper-agent" },
+    );
+    assert.equal(result?.block, true);
+    assert.ok(result?.blockReason?.startsWith(ReasonCodes.LaunchNonMainAgent));
+  });
+
+  it("blocks an ACP launch when the hook context carries no agent id", () => {
+    const { api } = createFakeApi();
+    const handler = createBeforeToolCallHandler(api, DEFAULT_GUARD_CONFIG);
+    const withoutAgent = handler(
+      { toolName: "exec", params: { command: ACP_LAUNCH_COMMAND } },
+      { toolName: "exec" },
+    );
+    assert.equal(withoutAgent?.block, true);
+    const withoutContext = handler({
+      toolName: "sessions_spawn",
+      params: { runtime: "acp", task: "example" },
+    });
+    assert.equal(withoutContext?.block, true);
+  });
+
+  it("passes ordinary commands and unrelated spawns from other agents", () => {
+    const { api, logs } = createFakeApi();
+    const handler = createBeforeToolCallHandler(api, DEFAULT_GUARD_CONFIG);
+    assert.equal(
+      handler(
+        { toolName: "exec", params: { command: ORDINARY_COMMAND } },
+        { toolName: "exec", agentId: "example-helper-agent" },
+      ),
+      undefined,
+    );
+    assert.equal(
+      handler(
+        { toolName: "sessions_spawn", params: { runtime: "subagent" } },
+        { toolName: "sessions_spawn", agentId: "example-helper-agent" },
+      ),
+      undefined,
+    );
+    assert.equal(logs.length, 0);
+  });
+
+  it("observes a non-main launch without blocking when enforcement is off", () => {
+    const { api, logs } = createFakeApi({ enforce: false });
+    const handler = createBeforeToolCallHandler(api);
+    const result = handler(
+      { toolName: "exec", params: { command: ACP_LAUNCH_COMMAND } },
+      { toolName: "exec", agentId: "example-helper-agent" },
+    );
+    assert.equal(result, undefined);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0]?.level, "info");
+  });
 });
 
 describe("logging never carries raw outbound content", () => {
@@ -264,6 +337,28 @@ describe("logging never carries raw outbound content", () => {
     assert.match(
       flattened,
       /^\[acp-report-guard\] hook=before_tool_call outcome=blocked kind=intermediate reason=acp_report_guard\.[a-z._]+$/u,
+    );
+  });
+
+  it("omits command text and agent ids when blocking a launch", () => {
+    const { api, logs } = createFakeApi();
+    const handler = createBeforeToolCallHandler(api, DEFAULT_GUARD_CONFIG);
+    const taintedCommand = `node ./${SECRET_MARKER}/acp-host-transport-cli.mjs --${SECRET_MARKER}`;
+    const taintedAgentId = `agent-${SECRET_MARKER}`;
+    const result = handler(
+      { toolName: "exec", params: { command: taintedCommand } },
+      { toolName: "exec", agentId: taintedAgentId },
+    );
+
+    assert.equal(result?.block, true);
+    const emitted = [flatten(logs), result?.blockReason ?? ""].join("\n");
+    assert.equal(emitted.includes(SECRET_MARKER), false);
+    assert.equal(emitted.includes(taintedCommand), false);
+    assert.equal(emitted.includes(taintedAgentId), false);
+    assert.equal(logs.length, 1);
+    assert.match(
+      flatten(logs),
+      /^\[acp-report-guard\] hook=before_tool_call outcome=blocked kind=launch reason=acp_report_guard\.launch\.non_main_agent$/u,
     );
   });
 });
