@@ -1,19 +1,26 @@
 #!/usr/bin/env node
 /**
- * Target-build `message_sending` cancellation smoke.
+ * Target-build smoke: `message_sending` cancellation and `before_tool_call`
+ * launch blocking.
  *
  * The unit suites exercise the pure policy functions. This smoke exercises the
  * *built* plugin through the *installed* OpenClaw hook runner instead, so it
  * proves the parts a pure-function test cannot:
  *
  * 1. `dist/index.js` loads against the real `openclaw/plugin-sdk/plugin-entry`
- *    and its `register` puts a `message_sending` handler into the registry.
+ *    and its `register` puts `message_sending` and `before_tool_call` handlers
+ *    into the registry.
  * 2. A canonical completion report carrying seconds (`17분 31초`) survives the
  *    authoritative guard - the regression this smoke exists for.
  * 3. A malformed lifecycle report is cancelled with the expected reason code.
  * 4. Ordinary chat is returned untouched.
- * 5. No raw outbound content reaches a log line, the cancel reason, or the
- *    hook metadata.
+ * 5. The installed runner dispatches `before_tool_call`: a recognized ACP
+ *    launch from a non-`main` agent is blocked with the stable reason code,
+ *    while the same launch from `main` and an ordinary command pass. The
+ *    smoke fails clearly if the installed runner no longer exposes the
+ *    expected `before_tool_call` dispatch contract.
+ * 6. No raw outbound content, command text, or agent id reaches a log line,
+ *    the cancel reason, the block reason, or the hook metadata.
  *
  * It is deliberately non-invasive. It never installs, enables, or activates the
  * plugin, never reads or writes OpenClaw config, and never contacts Gateway.
@@ -44,13 +51,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ReasonCodes } from "../../src/lifecycle/reason-codes.ts";
 import {
+  ACP_LAUNCH_COMMAND,
   CANONICAL_COMPLETION_WITH_SECONDS,
   ORDINARY_CHAT,
+  ORDINARY_COMMAND,
   completionWithDuration,
 } from "../fixtures.ts";
 
 const PLUGIN_ID = "acp-report-guard";
 const HOOK_NAME = "message_sending";
+const TOOL_HOOK_NAME = "before_tool_call";
+const UNAUTHORIZED_AGENT_ID = "smoke-helper-agent";
 const PLUGIN_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -118,13 +129,17 @@ function stageTargetBuild(openclawRoot: string): {
   };
 }
 
-/** Every fixture line that must never appear in a log, reason, or metadata. */
+/**
+ * Every fixture line, command string, and agent id that must never appear in a
+ * log, reason, or metadata.
+ */
 function contentNeedles(): readonly string[] {
   const lines = [
     CANONICAL_COMPLETION_WITH_SECONDS,
     MALFORMED_COMPLETION,
     ORDINARY_CHAT,
   ].flatMap((report) => report.split("\n"));
+  lines.push(ACP_LAUNCH_COMMAND, ORDINARY_COMMAND, UNAUTHORIZED_AGENT_ID);
   return [...new Set(lines.filter((line) => line.trim().length > 0))];
 }
 
@@ -133,7 +148,9 @@ async function main(): Promise<void> {
   const openclawVersion = JSON.parse(
     readFileSync(path.join(openclawRoot, "package.json"), "utf8"),
   ).version as string;
-  process.stdout.write(`openclaw ${openclawVersion} (${HOOK_NAME} runner)\n`);
+  process.stdout.write(
+    `openclaw ${openclawVersion} (${HOOK_NAME} + ${TOOL_HOOK_NAME} runner)\n`,
+  );
 
   const { workspace, entryUrl } = stageTargetBuild(openclawRoot);
 
@@ -195,7 +212,15 @@ async function main(): Promise<void> {
       (hook) => hook.hookName === HOOK_NAME,
     );
     assert.equal(messageSending.length, 1, `exactly one ${HOOK_NAME} handler`);
-    record(`built entry registers ${HOOK_NAME}`);
+    const beforeToolCall = typedHooks.filter(
+      (hook) => hook.hookName === TOOL_HOOK_NAME,
+    );
+    assert.equal(
+      beforeToolCall.length,
+      1,
+      `exactly one ${TOOL_HOOK_NAME} handler`,
+    );
+    record(`built entry registers ${HOOK_NAME} and ${TOOL_HOOK_NAME}`);
 
     pluginRuntime.initializeGlobalHookRunner({
       hooks: [],
@@ -209,11 +234,32 @@ async function main(): Promise<void> {
       true,
       `${HOOK_NAME} is visible to the global runner`,
     );
-    record(`installed runner dispatches ${HOOK_NAME} to the built plugin`);
+    assert.equal(
+      pluginRuntime.hasGlobalHooks(TOOL_HOOK_NAME),
+      true,
+      `${TOOL_HOOK_NAME} is visible to the global runner`,
+    );
+    assert.equal(
+      typeof runner.runBeforeToolCall,
+      "function",
+      `installed OpenClaw hook runner does not expose runBeforeToolCall; the host ${TOOL_HOOK_NAME} contract changed - update this smoke and src/host-contract.ts together`,
+    );
+    record(
+      `installed runner dispatches ${HOOK_NAME} and ${TOOL_HOOK_NAME} to the built plugin`,
+    );
 
     const ctx = { channelId: "smoke-channel" };
     const send = (content: string): Promise<unknown> =>
       runner.runMessageSending({ to: "smoke-target", content }, ctx);
+    const callTool = (
+      toolName: string,
+      params: Record<string, unknown>,
+      agentId?: string,
+    ): Promise<unknown> =>
+      runner.runBeforeToolCall(
+        { toolName, params },
+        agentId === undefined ? { toolName } : { toolName, agentId },
+      );
 
     // Capture everything the host and the plugin emit during dispatch.
     process.stdout.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
@@ -232,6 +278,26 @@ async function main(): Promise<void> {
       metadata?: Record<string, unknown>;
     };
     const chat = await send(ORDINARY_CHAT);
+
+    const mainLaunch = await callTool(
+      "exec",
+      { command: ACP_LAUNCH_COMMAND },
+      "main",
+    );
+    const helperLaunch = (await callTool(
+      "exec",
+      { command: ACP_LAUNCH_COMMAND },
+      UNAUTHORIZED_AGENT_ID,
+    )) as { block?: boolean; blockReason?: string };
+    const contextlessSpawn = (await callTool("sessions_spawn", {
+      runtime: "acp",
+      task: "smoke-example",
+    })) as { block?: boolean; blockReason?: string };
+    const ordinaryCommand = await callTool(
+      "exec",
+      { command: ORDINARY_COMMAND },
+      UNAUTHORIZED_AGENT_ID,
+    );
 
     process.stdout.write = realStdoutWrite;
     process.stderr.write = realStderrWrite;
@@ -261,12 +327,46 @@ async function main(): Promise<void> {
     assert.equal(chat, undefined, "ordinary chat must pass untouched");
     record("ordinary chat passes untouched");
 
+    assert.equal(
+      mainLaunch,
+      undefined,
+      "an ACP launch from the main agent must not be blocked",
+    );
+    record("ACP launch from agent `main` passes through the installed runner");
+
+    assert.equal(
+      helperLaunch?.block,
+      true,
+      "an ACP launch from a non-main agent must be blocked",
+    );
+    assert.ok(
+      helperLaunch.blockReason?.startsWith(ReasonCodes.LaunchNonMainAgent),
+      "block reason must start with the stable launch reason code",
+    );
+    assert.equal(
+      contextlessSpawn?.block,
+      true,
+      "an acp-runtime spawn without a context agent id must be blocked",
+    );
+    record(
+      `non-main ACP launches blocked with ${ReasonCodes.LaunchNonMainAgent}`,
+    );
+
+    assert.equal(
+      ordinaryCommand,
+      undefined,
+      "an ordinary command from a non-main agent must pass untouched",
+    );
+    record("ordinary command from a non-main agent passes untouched");
+
     const emitted = [
       ...logs.map((entry) => `${entry.level} ${entry.args.map(String).join(" ")}`),
       ...stdout,
       ...stderr,
       malformed.cancelReason ?? "",
       JSON.stringify(malformed.metadata ?? {}),
+      helperLaunch.blockReason ?? "",
+      contextlessSpawn.blockReason ?? "",
     ].join("\n");
     for (const needle of contentNeedles()) {
       assert.equal(

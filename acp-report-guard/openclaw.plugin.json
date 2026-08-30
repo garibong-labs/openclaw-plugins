@@ -1,8 +1,8 @@
 {
   "id": "acp-report-guard",
   "name": "ACP Report Guard",
-  "description": "Validates canonical ACP lifecycle reports and cancels malformed ones before delivery.",
-  "version": "0.1.0",
+  "description": "Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and restricts agent-started ACP launch routes to the main agent.",
+  "version": "0.2.0",
   "activation": {
     "onStartup": true,
     "onCapabilities": ["hook"]
@@ -20,6 +20,11 @@
         "type": "boolean",
         "default": true,
         "description": "Block direct message-tool publication of ACP intermediate reports."
+      },
+      "blockNonMainAcpLaunches": {
+        "type": "boolean",
+        "default": true,
+        "description": "Block recognized ACP launch routes when the hook context agent id is not exactly 'main'."
       },
       "maxIntermediateChars": {
         "type": "integer",
@@ -44,6 +49,10 @@
     },
     "blockDirectIntermediateToolCalls": {
       "label": "Block direct intermediate sends",
+      "advanced": true
+    },
+    "blockNonMainAcpLaunches": {
+      "label": "Block non-main ACP launches",
       "advanced": true
     },
     "maxIntermediateChars": {

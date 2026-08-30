@@ -242,12 +242,14 @@ describe("resolveGuardConfig", () => {
     const resolved = resolveGuardConfig({
       enforce: false,
       blockDirectIntermediateToolCalls: false,
+      blockNonMainAcpLaunches: false,
       maxIntermediateChars: 900,
       maxBoundaryReportChars: 1800,
     });
     assert.deepEqual(resolved, {
       enforce: false,
       blockDirectIntermediateToolCalls: false,
+      blockNonMainAcpLaunches: false,
       limits: { maxIntermediateChars: 900, maxBoundaryReportChars: 1800 },
     });
   });
