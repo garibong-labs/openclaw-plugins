@@ -65,8 +65,11 @@ valid.
 launch route. Recognized routes are:
 
 - a shell/exec tool call whose inspectable `command` string invokes one of the
-  canonical launch entrypoints by basename (`acp-host-transport-cli.mjs`,
-  `acpx-foreground-supervisor.mjs`, `claude-acp-launcher.mjs`);
+  canonical launch entrypoints (`acp-host-transport-cli.mjs`,
+  `acpx-foreground-supervisor.mjs`, `claude-acp-launcher.mjs`) in command
+  position - executed directly or as the script argument of `node`, including
+  after `;`, `&&`, `||`, or `|`. A launcher basename that appears only as
+  data (a `cat`, `rg`, or `echo` argument, for example) is not a launch;
 - a session-spawn tool call with `runtime: "acp"`.
 
 A missing, empty, or differently cased context agent id is unauthorized. The

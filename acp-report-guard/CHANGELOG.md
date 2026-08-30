@@ -10,15 +10,18 @@ plugin is versioned independently of the repository and follows
 
 - `before_tool_call` now also guards agent-started ACP launch routes as
   defense in depth: a shell/exec tool call whose inspectable command invokes a
-  canonical ACP launch entrypoint by basename (`acp-host-transport-cli.mjs`,
-  `acpx-foreground-supervisor.mjs`, `claude-acp-launcher.mjs`), or a
-  session-spawn tool call with `runtime: "acp"`, passes only when the hook
-  context `agentId` is exactly `main`. A missing, empty, differently cased, or
-  other agent id is blocked with the new stable reason code
-  `acp_report_guard.launch.non_main_agent`. Recognition fails open:
-  uninspectable commands, ordinary shell commands, unrelated session spawns,
-  and all other tool calls pass through untouched, and actions outside an
-  OpenClaw tool hook are unaffected.
+  canonical ACP launch entrypoint (`acp-host-transport-cli.mjs`,
+  `acpx-foreground-supervisor.mjs`, `claude-acp-launcher.mjs`) in command
+  position - executed directly or as the script argument of `node`, including
+  after `;`, `&&`, `||`, or `|` - or a session-spawn tool call with
+  `runtime: "acp"`, passes only when the hook context `agentId` is exactly
+  `main`. A missing, empty, differently cased, or other agent id is blocked
+  with the new stable reason code `acp_report_guard.launch.non_main_agent`.
+  Recognition fails open: uninspectable commands, ordinary shell commands
+  (including ones that merely mention a launcher basename as data, such as a
+  `cat`, `rg`, or `echo` argument), unrelated session spawns, and all other
+  tool calls pass through untouched, and actions outside an OpenClaw tool
+  hook are unaffected.
 - Configurable `blockNonMainAcpLaunches` (default `true`). With `enforce`
   false, or with this toggle off, non-main launches are observed and logged
   but never blocked.

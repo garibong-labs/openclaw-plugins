@@ -55,11 +55,61 @@ describe("commandInvokesAcpEntrypoint", () => {
     );
   });
 
+  it("recognizes direct execution and command position after separators", () => {
+    assert.equal(
+      commandInvokesAcpEntrypoint("./example-tools/claude-acp-launcher.mjs"),
+      true,
+    );
+    assert.equal(
+      commandInvokesAcpEntrypoint("true && node ./acp-host-transport-cli.mjs"),
+      true,
+    );
+    assert.equal(
+      commandInvokesAcpEntrypoint("false || ./acpx-foreground-supervisor.mjs"),
+      true,
+    );
+    assert.equal(
+      commandInvokesAcpEntrypoint("echo start | node claude-acp-launcher.mjs"),
+      true,
+    );
+    assert.equal(
+      commandInvokesAcpEntrypoint(
+        "EXAMPLE_FLAG=1 node --enable-source-maps ./claude-acp-launcher.mjs",
+      ),
+      true,
+    );
+  });
+
   it("ignores ordinary commands, even ACP-adjacent ones", () => {
     assert.equal(commandInvokesAcpEntrypoint(ORDINARY_COMMAND), false);
     assert.equal(commandInvokesAcpEntrypoint("echo acp launch soon"), false);
     assert.equal(
       commandInvokesAcpEntrypoint("cat notes/acp-host-transport-cli.md"),
+      false,
+    );
+  });
+
+  it("ignores launcher basenames outside command position", () => {
+    assert.equal(
+      commandInvokesAcpEntrypoint("cat ./tools/acp-host-transport-cli.mjs"),
+      false,
+    );
+    assert.equal(
+      commandInvokesAcpEntrypoint("rg acp-host-transport-cli.mjs docs"),
+      false,
+    );
+    assert.equal(
+      commandInvokesAcpEntrypoint("echo ./claude-acp-launcher.mjs"),
+      false,
+    );
+    assert.equal(
+      commandInvokesAcpEntrypoint(
+        "ls; grep -n launch ./acpx-foreground-supervisor.mjs",
+      ),
+      false,
+    );
+    assert.equal(
+      commandInvokesAcpEntrypoint("node lint.mjs claude-acp-launcher.mjs"),
       false,
     );
   });
@@ -157,6 +207,14 @@ describe("evaluateAcpLaunch", () => {
   it("passes ordinary commands and unrelated spawns from any agent", () => {
     assert.deepEqual(
       evaluateAcpLaunch(execEvent(ORDINARY_COMMAND), OTHER, DEFAULT_GUARD_CONFIG),
+      { action: "pass" },
+    );
+    assert.deepEqual(
+      evaluateAcpLaunch(
+        execEvent("cat ./tools/acp-host-transport-cli.mjs"),
+        OTHER,
+        DEFAULT_GUARD_CONFIG,
+      ),
       { action: "pass" },
     );
     assert.deepEqual(
