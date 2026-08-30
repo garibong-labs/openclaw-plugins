@@ -407,7 +407,7 @@ describe("completion duration grammar", () => {
 describe("reason code hygiene", () => {
   it("exposes only prefixed, content-free reason codes", () => {
     for (const code of ALL_REASON_CODES) {
-      assert.match(code, /^acp_report_guard\.[a-z]+\.[a-z_]+$/u);
+      assert.match(code, /^acp_lifecycle_guard\.[a-z]+\.[a-z_]+$/u);
     }
   });
 
@@ -416,7 +416,7 @@ describe("reason code hygiene", () => {
   });
 
   it("rejects an unknown code string", () => {
-    assert.equal(isReasonCode("acp_report_guard.unknown.code"), false);
+    assert.equal(isReasonCode("acp_lifecycle_guard.unknown.code"), false);
   });
 });
 

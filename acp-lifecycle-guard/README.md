@@ -1,10 +1,10 @@
-# openclaw-acp-report-guard
+# openclaw-acp-lifecycle-guard
 
 Native OpenClaw plugin that prevents **malformed ACP lifecycle reports** from
 being delivered.
 
-- Plugin id: `acp-report-guard`
-- Package: `openclaw-acp-report-guard`
+- Plugin id: `acp-lifecycle-guard`
+- Package: `openclaw-acp-lifecycle-guard`
 - Hooks: `message_sending` (authoritative), `before_tool_call` (defense in depth)
 - Runtime dependencies: none
 
@@ -73,7 +73,7 @@ launch route. Recognized routes are:
 - a session-spawn tool call with `runtime: "acp"`.
 
 A missing, empty, or differently cased context agent id is unauthorized. The
-block reason is the stable code `acp_report_guard.launch.non_main_agent` plus
+block reason is the stable code `acp_lifecycle_guard.launch.non_main_agent` plus
 generic wording; command text and agent ids are never echoed. Recognition
 fails open: an uninspectable command, an ordinary shell command, an unrelated
 session spawn, and every other tool call pass through untouched, and
@@ -106,7 +106,7 @@ messages, so the scope is narrow on purpose:
 
 ## Configuration
 
-`plugins.entries.acp-report-guard.config`:
+`plugins.entries.acp-lifecycle-guard.config`:
 
 | Key                                | Type    | Default | Meaning                                                                     |
 | ---------------------------------- | ------- | ------- | --------------------------------------------------------------------------- |
@@ -155,12 +155,12 @@ The guard never logs, persists, or returns raw outbound content. A decision
 produces exactly one log line of the form:
 
 ```
-[acp-report-guard] hook=message_sending outcome=cancelled kind=intermediate reason=acp_report_guard.intermediate.elapsed_drift
+[acp-lifecycle-guard] hook=message_sending outcome=cancelled kind=intermediate reason=acp_lifecycle_guard.intermediate.elapsed_drift
 ```
 
 `cancelReason` is a bare reason code. Hook metadata is limited to
 `{ pluginId, lifecycleKind, reasonCode }`. Reason codes are stable, prefixed
-`acp_report_guard.`, and enumerated in `src/lifecycle/reason-codes.ts`; a unit
+`acp_lifecycle_guard.`, and enumerated in `src/lifecycle/reason-codes.ts`; a unit
 test asserts that no other string shape can be emitted.
 
 ## Development
@@ -187,7 +187,7 @@ plugin SDK, that its `register` puts `message_sending` and `before_tool_call`
 handlers into the registry, that the global runner dispatches both hooks, that a
 valid completion carrying seconds passes, that a malformed report is cancelled
 with the expected reason code, that ordinary chat passes, that a non-main ACP
-launch is blocked with `acp_report_guard.launch.non_main_agent` while a `main`
+launch is blocked with `acp_lifecycle_guard.launch.non_main_agent` while a `main`
 launch and an ordinary command pass, and that no raw outbound content, command
 text, or agent id reaches a log line, the cancel reason, the block reason, or
 the hook metadata. It fails with an explicit message if the installed runner no

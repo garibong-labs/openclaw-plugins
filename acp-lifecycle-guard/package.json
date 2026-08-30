@@ -1,6 +1,6 @@
 {
-  "name": "openclaw-acp-report-guard",
-  "version": "0.2.0",
+  "name": "openclaw-acp-lifecycle-guard",
+  "version": "0.3.0",
   "description": "OpenClaw plugin that validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and restricts agent-started ACP launch routes to the main agent.",
   "license": "MIT",
   "type": "module",

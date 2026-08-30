@@ -247,7 +247,7 @@ describe("evaluateAcpLaunch", () => {
     assert.equal(isReasonCode(ReasonCodes.LaunchNonMainAgent), true);
     assert.equal(
       ReasonCodes.LaunchNonMainAgent,
-      "acp_report_guard.launch.non_main_agent",
+      "acp_lifecycle_guard.launch.non_main_agent",
     );
   });
 });

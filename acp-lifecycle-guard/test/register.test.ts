@@ -311,7 +311,7 @@ describe("logging never carries raw outbound content", () => {
     }
     assert.match(
       flattened,
-      /^\[acp-report-guard\] hook=message_sending outcome=cancelled kind=intermediate reason=acp_report_guard\.[a-z._]+$/u,
+      /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=intermediate reason=acp_lifecycle_guard\.[a-z._]+$/u,
     );
   });
 
@@ -336,7 +336,7 @@ describe("logging never carries raw outbound content", () => {
     assert.equal(flattened.includes(SECRET_MARKER), false);
     assert.match(
       flattened,
-      /^\[acp-report-guard\] hook=before_tool_call outcome=blocked kind=intermediate reason=acp_report_guard\.[a-z._]+$/u,
+      /^\[acp-lifecycle-guard\] hook=before_tool_call outcome=blocked kind=intermediate reason=acp_lifecycle_guard\.[a-z._]+$/u,
     );
   });
 
@@ -358,7 +358,7 @@ describe("logging never carries raw outbound content", () => {
     assert.equal(logs.length, 1);
     assert.match(
       flatten(logs),
-      /^\[acp-report-guard\] hook=before_tool_call outcome=blocked kind=launch reason=acp_report_guard\.launch\.non_main_agent$/u,
+      /^\[acp-lifecycle-guard\] hook=before_tool_call outcome=blocked kind=launch reason=acp_lifecycle_guard\.launch\.non_main_agent$/u,
     );
   });
 });

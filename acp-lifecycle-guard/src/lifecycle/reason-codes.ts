@@ -6,7 +6,7 @@
  * identifiers, session keys, or any other runtime value.
  */
 
-export const REASON_CODE_PREFIX = "acp_report_guard";
+export const REASON_CODE_PREFIX = "acp_lifecycle_guard";
 
 export const ReasonCodes = {
   /** Report exceeds the configured character ceiling for its lifecycle kind. */
