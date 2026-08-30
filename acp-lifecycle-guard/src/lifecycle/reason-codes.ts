@@ -73,8 +73,11 @@ export const ReasonCodes = {
   ReceiptEvicted: `${REASON_CODE_PREFIX}.receipt.evicted`,
   /** Enforce mode requested a bounded finalize revise round. */
   ReceiptReviseRequested: `${REASON_CODE_PREFIX}.receipt.revise_requested`,
-  /** Bounded revise budget spent without a receipt; the host will finalize. */
-  ReceiptReviseExhausted: `${REASON_CODE_PREFIX}.receipt.revise_exhausted`,
+  /**
+   * An agent end on a tracked session key could not prove run identity; the
+   * entry is retained as a bounded end-observed terminal candidate.
+   */
+  ReceiptEndUnproven: `${REASON_CODE_PREFIX}.receipt.end_unproven`,
 } as const;
 
 export type ReasonCode = (typeof ReasonCodes)[keyof typeof ReasonCodes];

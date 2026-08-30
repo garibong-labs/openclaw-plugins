@@ -26,11 +26,16 @@
  *  7. The installed runner dispatches all four receipt hooks: an eligible cron
  *     checkpoint correlates, an exact-target send receipt is accepted (a
  *     failed send and a wrong-target success are not), a missing receipt
- *     yields the bounded enforce-mode revise result, the *installed* finalize
- *     retry accounting turns exhausted revise rounds into plain continuation
- *     (the host fails open there - the guard logs the exhaustion instead of
- *     claiming delivery), cleanup on `agent_end` is deterministic, and
- *     ordinary turns bypass everything.
+ *     yields the bounded enforce-mode revise result on every round (the guard
+ *     keeps no local budget), the *installed* finalize retry accounting
+ *     allows exactly the bounded applied rounds and then turns further
+ *     requests into plain continuation (the host fails open there - the
+ *     guard's per-round revise_requested log is the trace, never a
+ *     plugin-authored exhausted signal), a proven-identity `agent_end`
+ *     cleans up while an unprovable one retains the entry observably
+ *     (`receipt.end_unproven`) with the checkpoint still guarded and the
+ *     next registration displacing the candidate as an observable eviction,
+ *     and ordinary turns bypass everything.
  *  8. Eligibility is proven behaviorally on both installed cron context
  *     shapes: without `jobId` (the embedded cron runner omits it from the
  *     `before_agent_run` context it assembles - verified by hand on the
@@ -53,12 +58,13 @@
  *     circuits before this guard runs, and a lower-priority block still wins
  *     over this guard's explicit pass - an earlier or later block is never
  *     un-stuck by the guard passing.
- * 12. Finalize merge and budget contract: when a synthetic plugin's
- *     `finalize` decision wins the installed merge, this guard's revise
- *     request is discarded, its *requested*-rounds counter still advances
- *     (documented conservative under-request), and the installed harness
- *     accounting charges the per-run idempotency-key budget only when a
- *     revise decision actually wins the merge.
+ * 12. Finalize merge and budget contract: a synthetic plugin's `finalize`
+ *     decision wins the installed merge over this guard's revise for two
+ *     rounds without consuming any budget; once the guard's revise can win,
+ *     the installed harness accounting applies and charges exactly the
+ *     bounded per-(runId, idempotencyKey) rounds and then continues - two
+ *     overridden requests never prevent the guard from later revising, and
+ *     the run always eventually finalizes.
  * 13. The installed gate's nullish normalization is pinned with synthetic
  *     probes: a `null` handler result is blocked outright and `undefined`
  *     survives only an incidental merge-layer guard, so this guard's
@@ -136,6 +142,7 @@ const SMOKE_SCENARIOS = [
   "jobid",
   "mapper",
   "drift",
+  "idless",
   "sticky1",
   "sticky2",
   "override",
@@ -718,8 +725,9 @@ async function main(): Promise<void> {
     const wrongAfterReceipt = await finalizeCheckpoint("wrong");
     await endCheckpoint("wrong");
 
-    // Exhausted revise budget: drive the *installed* harness finalize helper,
-    // which owns the host-side retry accounting.
+    // Host-side revise budget: drive the *installed* harness finalize
+    // helper, which owns the retry accounting. The guard requests revise on
+    // every round; the host applies the bounded rounds and then continues.
     const budgetStart = await startCheckpoint("budget");
     const budgetDecisions: Array<{ action?: string; reason?: string }> = [];
     for (
@@ -900,15 +908,20 @@ async function main(): Promise<void> {
       undefined,
       "an exact-target receipt after a revise must satisfy the guard",
     );
-    const reviseRequestLogs = enforceRegistration.logs.filter((entry) =>
-      entry.args.some(
-        (arg) =>
-          typeof arg === "string" &&
-          arg.includes(ReasonCodes.ReceiptReviseRequested),
-      ),
-    );
-    assert.ok(
-      reviseRequestLogs.length >= 1,
+    const countLogs = (logs: LogRecord[], needle: string): number =>
+      logs.filter((entry) =>
+        entry.args.some(
+          (arg) => typeof arg === "string" && arg.includes(needle),
+        ),
+      ).length;
+    // Every requested round is logged: one for the wrong-target scenario,
+    // one for the jobId scenario, and all MAX+1 budget-scenario rounds (the
+    // guard keeps no local budget, so the round past the host bound is
+    // still requested and logged, never converted into a plugin-authored
+    // exhausted signal).
+    assert.equal(
+      countLogs(enforceRegistration.logs, ReasonCodes.ReceiptReviseRequested),
+      MAX_RECEIPT_REVISE_ATTEMPTS + 3,
       "each requested revise round must be logged with receipt.revise_requested",
     );
     record(
@@ -927,21 +940,16 @@ async function main(): Promise<void> {
       "the installed finalize retry accounting must allow exactly the bounded revise rounds and then continue",
     );
     // The host fails open after the budget: the run finalizes without a
-    // receipt. The guard's warn log is the only trace, so it must exist.
-    const exhaustedLogs = enforceRegistration.logs.filter((entry) =>
-      entry.args.some(
-        (arg) =>
-          typeof arg === "string" &&
-          arg.includes(ReasonCodes.ReceiptReviseExhausted),
-      ),
-    );
+    // receipt. The guard's per-round revise_requested warn logs (counted
+    // above) are the trace; it never authors a false exhausted signal of
+    // its own, because it cannot know which requested rounds won the merge.
     assert.equal(
-      exhaustedLogs.length,
-      1,
-      "exhausted revise budget must be recorded with the stable reason code",
+      countLogs(enforceRegistration.logs, "revise_exhausted"),
+      0,
+      "the guard must not emit a plugin-authored exhausted signal",
     );
     record(
-      "installed host continues after the bounded revise budget (fail-open) and the guard records the exhaustion loudly",
+      "installed host continues after the bounded revise budget (fail-open); every requested round stays logged and no false exhausted signal is authored",
     );
 
     assert.equal(
@@ -1000,6 +1008,81 @@ async function main(): Promise<void> {
     );
     record("ordinary and uncorrelatable turns bypass the receipt guard");
 
+    // ============ Id-less run identity (unprovable agent_end) ==============
+    // A tracked id-less checkpoint must survive an id-less agent_end on the
+    // same session key: identity is unprovable there, and deleting on
+    // matching absence would let any unrelated id-less run disarm the guard.
+    // The retention is surfaced with receipt.end_unproven, the checkpoint
+    // stays enforced, and the next registration displaces the end-observed
+    // candidate as an observable eviction instead of an ambiguity drop.
+    const idlessRegistration = registerPlugin({
+      ownerCheckpointReceiptMode: "enforce",
+    });
+    runner = initRunner(idlessRegistration.typedHooks, [PLUGIN_ID]);
+    const idlessCtx: Record<string, unknown> = {
+      trigger: "cron",
+      sessionKey: "smoke-session-idless",
+      sessionId: "smoke-session-id-idless",
+      channel: SMOKE_CHANNEL,
+      channelId: SMOKE_CONVERSATION,
+    };
+    const idlessFinalizeEvent = {
+      sessionId: "smoke-session-id-idless",
+      sessionKey: "smoke-session-idless",
+      stopHookActive: false,
+    };
+    const idlessStart = await runner.runBeforeAgentRun(
+      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+      idlessCtx,
+    );
+    // An id-less run ends on the session key while the checkpoint pends.
+    await runner.runAgentEnd({ messages: [], success: true }, idlessCtx);
+    const idlessFinalize = (await runner.runBeforeAgentFinalize(
+      idlessFinalizeEvent,
+      idlessCtx,
+    )) as { action?: string };
+    const idlessSecondStart = await runner.runBeforeAgentRun(
+      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+      idlessCtx,
+    );
+    await sendCheckpointReport("idless");
+    const idlessAfterReceipt = await runner.runBeforeAgentFinalize(
+      idlessFinalizeEvent,
+      idlessCtx,
+    );
+    pluginRuntime.resetGlobalHookRunner();
+
+    assert.deepEqual(idlessStart, gatePass);
+    assert.deepEqual(idlessSecondStart, gatePass);
+    assert.equal(
+      idlessFinalize?.action,
+      "revise",
+      "an unprovable agent_end must not disarm a pending id-less checkpoint",
+    );
+    assert.equal(
+      idlessAfterReceipt,
+      undefined,
+      "the displacing id-less registration must be guarded and satisfied by an exact-target receipt",
+    );
+    assert.equal(
+      countLogs(idlessRegistration.logs, ReasonCodes.ReceiptEndUnproven),
+      1,
+      "the unprovable end must be surfaced once with receipt.end_unproven",
+    );
+    assert.equal(
+      countLogs(idlessRegistration.logs, ReasonCodes.ReceiptEvicted),
+      1,
+      "displacing the end-observed candidate must surface as one observable eviction",
+    );
+    assert.equal(
+      countLogs(idlessRegistration.logs, ReasonCodes.ReceiptUncorrelatable),
+      0,
+      "the displacing registration must not be dropped as ambiguous",
+    );
+    record(
+      "unprovable id-less agent_end retains the guarded checkpoint (receipt.end_unproven); the next registration displaces it as an observable eviction and is fully guarded",
+    );
+
     // ================= Phase C: composition probes =========================
     const BLOCKER_ID = "smoke-blocker";
     const blockerHook = (priority: number): TypedHook => ({
@@ -1053,11 +1136,15 @@ async function main(): Promise<void> {
       "two-handler gate composition: an earlier or later synthetic block stays sticky; this guard's explicit pass never overrides it",
     );
 
-    // Finalize merge: a synthetic plugin's `finalize` decision wins over this
-    // guard's revise request; the guard's requested-rounds counter still
-    // advances (documented conservative under-request), and the miss is still
-    // recorded loudly through the exhausted log.
+    // Finalize merge and budget: a synthetic plugin's `finalize` decision
+    // wins the installed merge over this guard's revise for the first two
+    // rounds. Because the guard keeps no local budget and the host charges
+    // its per-(runId, idempotencyKey) accounting only for revise decisions
+    // that *win* the merge, those overridden requests consume nothing: once
+    // the other plugin goes silent, the guard's revise is applied and
+    // charged for exactly the bounded rounds, and the host then continues.
     const OVERRIDER_ID = "smoke-finalizer";
+    const OVERRIDDEN_ROUNDS = 2;
     let overrideRounds = 0;
     const overrideRegistration = registerPlugin({
       ownerCheckpointReceiptMode: "enforce",
@@ -1070,7 +1157,7 @@ async function main(): Promise<void> {
           hookName: "before_agent_finalize",
           handler: () => {
             overrideRounds += 1;
-            return overrideRounds === 1
+            return overrideRounds <= OVERRIDDEN_ROUNDS
               ? { action: "finalize", reason: "smoke synthetic finalize" }
               : undefined;
           },
@@ -1087,7 +1174,7 @@ async function main(): Promise<void> {
     const overrideDecisions: Array<{ action?: string }> = [];
     for (
       let round = 0;
-      round < MAX_RECEIPT_REVISE_ATTEMPTS + 1;
+      round < OVERRIDDEN_ROUNDS + MAX_RECEIPT_REVISE_ATTEMPTS + 1;
       round += 1
     ) {
       overrideDecisions.push(
@@ -1101,26 +1188,26 @@ async function main(): Promise<void> {
     assert.deepEqual(
       overrideDecisions.map((decision) => decision?.action),
       [
-        "finalize",
+        ...Array.from({ length: OVERRIDDEN_ROUNDS }, () => "finalize"),
         ...Array.from(
-          { length: MAX_RECEIPT_REVISE_ATTEMPTS - 1 },
+          { length: MAX_RECEIPT_REVISE_ATTEMPTS },
           () => "revise",
         ),
         "continue",
       ],
-      "when another plugin's finalize wins the merge, this guard's requested round is discarded and it under-requests (never over-revises) afterwards",
+      "two overridden guard requests must not consume the budget: once the guard's revise can win, the host applies and charges exactly the bounded rounds, then continues",
     );
-    const overrideExhausted = overrideRegistration.logs.filter((entry) =>
-      entry.args.some(
-        (arg) =>
-          typeof arg === "string" &&
-          arg.includes(ReasonCodes.ReceiptReviseExhausted),
-      ),
+    // The guard requested revise on every round - overridden and winning
+    // alike - and never authored a false exhausted signal.
+    assert.equal(
+      countLogs(overrideRegistration.logs, ReasonCodes.ReceiptReviseRequested),
+      OVERRIDDEN_ROUNDS + MAX_RECEIPT_REVISE_ATTEMPTS + 1,
+      "every requested revise round must be logged, including overridden ones",
     );
     assert.equal(
-      overrideExhausted.length,
-      1,
-      "the overridden checkpoint's miss must still surface through the exhausted log",
+      countLogs(overrideRegistration.logs, "revise_exhausted"),
+      0,
+      "an overridden or budget-spent request must never surface as a plugin-authored exhausted signal",
     );
     await runner.runAgentEnd(
       { runId: "smoke-run-override", messages: [], success: true },
@@ -1128,7 +1215,7 @@ async function main(): Promise<void> {
     );
     pluginRuntime.resetGlobalHookRunner();
     record(
-      "finalize-merge override: another plugin's finalize wins, the guard under-requests conservatively, and the miss is still logged loudly",
+      "finalize-merge override: two overridden revise requests consume no budget; the guard's later winning revise is applied and charged for the bounded rounds, and the host then continues",
     );
 
     // Installed budget accounting: the per-(runId, idempotencyKey) charge

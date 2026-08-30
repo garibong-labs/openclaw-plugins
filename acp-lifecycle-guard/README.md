@@ -126,11 +126,15 @@ silently; exact unrelated cron prompts stay silent, and untrusted provenance
 never produces the signal.
 
 Registrations on one session key are conservative: a re-registration that
-proves the **same run id** is idempotent (receipt and revise state are
-preserved), while two live registrations that cannot prove they are the same
-run - differing run ids, or either side missing one - are indistinguishable
-on the outbound path, so both are dropped from tracking (fail open) rather
-than guessed at.
+proves the **same run id** is idempotent (receipt state is preserved), while
+two live registrations that cannot prove they are the same run - differing
+run ids, or either side missing one - are indistinguishable on the outbound
+path, so both are dropped from tracking (fail open) rather than guessed at.
+The one exception is an entry already marked as an *end-observed terminal
+candidate* (see cleanup below): some run on the session key has provably
+ended without provable identity, so the next registration displaces the
+candidate as an observable eviction instead of an ambiguity drop - this is
+what keeps consecutive id-less checkpoints guarded.
 
 Whatever the classification - eligible, ordinary, uncorrelatable, ambiguous,
 or an internal guard defect - the handler returns the host's explicit
@@ -177,11 +181,18 @@ finalize without a receipt:
   requested round is logged with
   `acp_lifecycle_guard.receipt.revise_requested`.
 
-**Cleanup (`agent_end`).** State is removed deterministically when the ending
-run's identity **provably agrees** with the tracked one: both run ids present
-and equal, or both absent (the pinned host builds both hook contexts from the
-same run params, so matching absence is the same-run shape). A different or
-unprovable run can never silently disarm a pending checkpoint.
+**Cleanup (`agent_end`).** State is removed only on **proof** of same-run
+identity: both run ids present and equal. Matching absence is **not** proof -
+two id-less runs on one session key are indistinguishable, so an unrelated
+id-less run ending must never disarm a tracked id-less checkpoint. An end
+that cannot prove identity (at least one side without a run id) therefore
+never deletes: it marks the entry as an **end-observed terminal candidate**,
+surfaced content-free with `acp_lifecycle_guard.receipt.end_unproven`. The
+candidate keeps guarding (the tracked run may still be live - its receipt
+still confirms and its finalize still enforces), and it stays bounded and
+observable: the next registration displaces it as an eviction, cap eviction
+prefers it over fresh pending entries, and the TTL tombstone still applies.
+A proven-different run id changes nothing.
 
 Bounded state never disarms silently. Past the TTL a pending entry becomes a
 **stale tombstone**: enforcement is disarmed (a run that old is never
@@ -190,30 +201,40 @@ reported explicitly with `acp_lifecycle_guard.receipt.stale_missing`, a late
 exact-target receipt still confirms, and a provable `agent_end` still cleans
 up. When the size cap or a new registration displaces entries, every removal
 is surfaced with `acp_lifecycle_guard.receipt.evicted` (stale tombstones are
-evicted before any fresh pending entry).
+evicted before end-observed candidates, and both before any fresh pending
+entry).
 
 **What enforcement can and cannot guarantee.** The installed host's finalize
 retry accounting (`normalizeBeforeAgentFinalizeResult`) allows exactly
-`maxAttempts` revise rounds per run and idempotency key, then turns further
-revise requests into plain continuation: **exhausted retries fail open at the
-host - the run finalizes without a receipt**. The target-build smoke drives
-the installed helper to prove exactly this sequence. The guard therefore does
-not claim fail-closed delivery: what it guarantees is that a missing receipt
-is never silent - the exhaustion is logged with
-`acp_lifecycle_guard.receipt.revise_exhausted`, and the guard never records or
-reports a receipt that did not happen.
+`maxAttempts` **applied** revise rounds per run and idempotency key (keyed by
+`event.runId ?? event.sessionId ?? "unknown-run"`, so the bound holds even
+for id-less runs), then turns further revise requests into plain
+continuation: **exhausted retries fail open at the host - the run finalizes
+without a receipt**. The target-build smoke drives the installed helper to
+prove exactly this sequence. The guard therefore does not claim fail-closed
+delivery: what it guarantees is that a missing receipt is never silent -
+every requested round is logged with
+`acp_lifecycle_guard.receipt.revise_requested`, and the guard never records
+or reports a receipt that did not happen.
 
-The guard's own revise counter bounds **requested** rounds. The installed
-host merges finalize results across plugins (another plugin's `finalize`
-decision wins over this guard's `revise`) and acknowledges nothing back to
-handlers, while its own retry accounting charges the per-run,
-per-idempotency-key budget only when a revise decision actually wins the
-merge - that accounting is the authoritative bound on **applied** rounds.
-When another plugin's decision wins, this guard under-requests rather than
-over-revises: it degrades toward finalizing without a receipt (this
-repository's fail-open direction) and the miss still surfaces through the
-exhausted log. The target-build smoke pins both sides of this contract
-against the installed build.
+The guard keeps **no local revise budget**. The installed host merges
+finalize results across plugins (another plugin's `finalize` decision wins
+over this guard's `revise`) and acknowledges nothing back to handlers, so a
+plugin-local requested-rounds counter could not tell an applied round from an
+overridden one: another plugin's winning decisions would consume the guard's
+effective budget and stop it from ever revising. Instead the guard requests
+the same bounded, idempotent revise on every receipt-less enforce round and
+relies on the host's retry accounting, which charges the per-run,
+per-idempotency-key budget **only when a revise decision actually wins the
+merge** - the authoritative bound on applied rounds. Overridden requests
+consume nothing, the guard can still revise once its decision can win, and
+the run always eventually finalizes once the winning budget is spent. The
+guard never authors an "exhausted" signal of its own - it cannot know which
+requested rounds won - so there is no false plugin-authored exhaustion; the
+per-round `revise_requested` log is the truthful trace. The target-build
+smoke pins both sides of this contract against the installed build,
+including two overridden rounds followed by winning rounds that are applied,
+charged, and then continued past.
 
 ## What it deliberately does **not** guard
 
@@ -348,21 +369,27 @@ mappers** (imported from `openclaw/plugin-sdk/hook-runtime`) confirms a
 receipt while pinning the delivery-path contract - no `runId` on either
 projection, `sessionKey` preserved, and the raw wrapper-prefixed `to` passed
 through as `conversationId`; a missing receipt in enforce mode yields the
-bounded revise result; the host's own retry accounting allows exactly the
-bounded revise rounds and then **continues (fails open)**, with the guard
-logging `acp_lifecycle_guard.receipt.revise_exhausted`; a near-miss cron
-marker emits `acp_lifecycle_guard.receipt.marker_drift` without tracking;
-`agent_end` cleans state deterministically; and ordinary and uncorrelatable
+bounded revise result on every round (each logged with
+`acp_lifecycle_guard.receipt.revise_requested`, never a plugin-authored
+exhausted signal); the host's own retry accounting allows exactly the
+bounded applied revise rounds and then **continues (fails open)**; a
+near-miss cron marker emits `acp_lifecycle_guard.receipt.marker_drift`
+without tracking; a proven-identity `agent_end` cleans state while an
+unprovable id-less end retains the guarded entry
+(`acp_lifecycle_guard.receipt.end_unproven`) and the next registration
+displaces it as an observable eviction; and ordinary and uncorrelatable
 turns bypass everything.
 
 Phase C composes the guard with synthetic second plugins: an earlier
 higher-priority `before_agent_run` block short-circuits and a later
 lower-priority block still wins over the guard's explicit pass (a block is
 never un-stuck); a synthetic plugin's `finalize` decision wins the installed
-merge, discarding the guard's revise request while the guard conservatively
-under-requests and still logs the miss; and the installed finalize budget is
-proven to be charged per run and idempotency key **only when a revise
-decision wins the merge**. Synthetic probes also pin the installed gate's
+merge over the guard's revise for two rounds **without consuming any
+budget**, after which the guard's winning revise is applied and charged for
+exactly the bounded rounds before the host continues; and the installed
+finalize budget is proven to be charged per run and idempotency key **only
+when a revise decision wins the merge**. Synthetic probes also pin the
+installed gate's
 nullish normalization (`null` blocks outright; `undefined` survives only an
 incidental merge-layer guard). Throughout, no raw prompt text, outbound
 content, command text, agent id, or correlation identifier reaches a log

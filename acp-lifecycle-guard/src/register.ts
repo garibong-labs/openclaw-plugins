@@ -376,25 +376,18 @@ export function createReceiptHookHandlers(
         });
         return;
       }
-      if (outcome.kind === "exhausted") {
-        // The host's finalize retry accounting turns further revise requests
-        // into plain continuation, so the run will finalize without a
-        // receipt. Record that loudly; never report it as confirmed.
-        logDecision(api.logger, "warn", {
-          hook: "before_agent_finalize",
-          outcome: "observed",
-          kind: "receipt",
-          reason: ReasonCodes.ReceiptReviseExhausted,
-        });
-        return;
-      }
-      // Revise budget contract: the tracker counts *requested* rounds; the
-      // installed host merges finalize results across plugins without
-      // acknowledging which decision won, and its own per-run,
-      // per-idempotency-key retry accounting (charged only when a revise
-      // decision wins the merge) bounds the *applied* rounds. When another
-      // plugin's decision wins, this guard under-requests rather than
-      // over-revises; the miss still surfaces through the exhausted log.
+      // Revise budget contract: the guard keeps no local budget and
+      // requests the same bounded, idempotent revise on every receipt-less
+      // enforce round - the installed host merges finalize results across
+      // plugins without acknowledging which decision won, so local
+      // accounting would let another plugin's winning decisions consume
+      // this guard's effective budget. The host's own retry accounting
+      // (`normalizeBeforeAgentFinalizeResult`, keyed by
+      // `event.runId ?? event.sessionId` and this guard's idempotency key)
+      // charges only revise decisions that win the merge and turns further
+      // winning requests into plain continuation once `retry.maxAttempts`
+      // applied rounds are spent, so the run always eventually finalizes
+      // and each requested round below stays the loud, truthful trace.
       logDecision(api.logger, "warn", {
         hook: "before_agent_finalize",
         outcome: "revise",
@@ -418,10 +411,21 @@ export function createReceiptHookHandlers(
 
   const agentEnd = (event: AgentEndEvent, ctx?: AgentHookContext): void => {
     try {
-      tracker.end({
+      const outcome = tracker.end({
         sessionKey: ctx?.sessionKey,
         runId: ctx?.runId ?? event?.runId,
       });
+      if (outcome.kind === "retained_unproven") {
+        // An end without provable run identity never disarms the tracked
+        // checkpoint; the retained terminal candidate stays observable here
+        // and bounded by displacement, cap eviction, and the TTL.
+        logDecision(api.logger, "info", {
+          hook: "agent_end",
+          outcome: "observed",
+          kind: "receipt",
+          reason: ReasonCodes.ReceiptEndUnproven,
+        });
+      }
     } catch {
       // Fail open.
     }

@@ -30,9 +30,10 @@
  *   verified mismatch.
  * - `before_agent_finalize` decides: pass with a receipt, observe or revise
  *   without one.
- * - `agent_end` cleans up deterministically when the ending run's identity
- *   provably agrees with the tracked one; a size cap and TTL tombstones
- *   bound the state of abandoned runs without silently disarming pending
+ * - `agent_end` deletes only on *proof* of same-run identity; an end that
+ *   cannot prove identity retains the entry as an observable end-observed
+ *   terminal candidate, and a size cap, TTL tombstones, and observable
+ *   displacement bound that state without silently disarming pending
  *   checkpoints.
  *
  * ## Correlation rule (single source of truth)
@@ -46,16 +47,21 @@
  *
  * - *contradiction* (both sides carry a run id and they differ) always means
  *   "not the tracked run";
- * - the destructive `end` transition additionally requires *exact agreement*
- *   (`entry.runId === correlation.runId`, where both-absent counts as
- *   agreement because the pinned host builds both hook contexts from the
- *   same run params) - a run that cannot prove it is the tracked one can
- *   never silently disarm a pending checkpoint;
+ * - the destructive `end` transition requires *proof* of identity: both run
+ *   ids present and equal. Matching absence is **not** proof - two id-less
+ *   runs on one session key are indistinguishable, so an unrelated id-less
+ *   run ending must never disarm a tracked id-less checkpoint. An end that
+ *   cannot prove identity therefore never deletes; it marks the entry as an
+ *   *end-observed terminal candidate* that keeps guarding but is displaced
+ *   by the next registration as an observable eviction, preferred by cap
+ *   eviction after stale tombstones, and bounded by the TTL;
  * - two live registrations on one session key that cannot prove they are the
  *   same run (either run id absent, or ids differing) are indistinguishable
  *   at `message_sent` time, so tracking is dropped for both (fail open)
  *   rather than guessed at. A re-registration that proves the same run id is
- *   idempotent and preserves receipt and revise state.
+ *   idempotent and preserves receipt state; one arriving after an unproven
+ *   end displaces the terminal candidate instead of ambiguity-dropping, so
+ *   consecutive id-less checkpoints stay guarded.
  *
  * Everything here is pure and host-free: no I/O, no logging, no clock access
  * except through the injected `now`. Correlation identifiers live only in
@@ -90,7 +96,14 @@ export const MAX_TRACKED_CHECKPOINTS = 64;
  */
 export const CHECKPOINT_TTL_MS = 6 * 60 * 60 * 1000;
 
-/** Bounded number of finalize revise rounds *requested* per checkpoint. */
+/**
+ * Bounded number of finalize revise rounds *applied* per run. This module
+ * keeps no local budget: the bound is passed to the host as
+ * `retry.maxAttempts` and enforced by the installed host's winning-decision
+ * retry accounting (`normalizeBeforeAgentFinalizeResult`, keyed by
+ * `event.runId ?? event.sessionId ?? "unknown-run"` and the idempotency key,
+ * charged only when a revise decision wins the finalize merge).
+ */
 export const MAX_RECEIPT_REVISE_ATTEMPTS = 2;
 
 /** Stable idempotency key for the finalize revise retry budget. */
@@ -147,12 +160,18 @@ type CheckpointEntry = {
   conversation: string;
   /** True once an exact-destination successful send has been observed. */
   receiptConfirmed: boolean;
-  /** Finalize revise rounds already *requested* for this checkpoint. */
-  reviseAttempts: number;
   /** Registration time from the injected clock, for TTL staleness. */
   registeredAtMs: number;
   /** True once the TTL has passed: disarmed for enforcement, kept observable. */
   stale: boolean;
+  /**
+   * True once an `end` on this session key could not prove run identity
+   * (at least one side missing a run id). The entry is then a terminal
+   * *candidate*: it keeps guarding (the tracked run may still be live), but
+   * the next registration displaces it as an observable eviction, and cap
+   * eviction prefers it over fresh pending entries.
+   */
+  endObserved: boolean;
 };
 
 export type RegisterOutcome =
@@ -206,16 +225,30 @@ export type FinalizeOutcome =
    * `unrelated`.
    */
   | { kind: "stale_missing" }
-  /** Enforce mode: request one bounded revise round. */
-  | { kind: "revise"; attempt: number }
   /**
-   * Enforce mode with the bounded revise budget spent. The host's own
-   * finalize retry accounting turns further revise requests into `continue`
-   * (`normalizeBeforeAgentFinalizeResult` in the installed build), so the
-   * run will finalize without a receipt; this outcome exists so the miss is
-   * loudly recorded rather than silently described as delivered.
+   * Enforce mode: request the bounded, idempotent revise. Requested on
+   * *every* receipt-less enforce finalize - this module keeps no local
+   * budget, because the installed host merges finalize results across
+   * plugins without acknowledging which decision won, so a local requested
+   * counter would let another plugin's winning decision consume this
+   * guard's effective budget. The host's winning-decision retry accounting
+   * is the authoritative bound on applied rounds (see `finalize`).
    */
-  | { kind: "exhausted" };
+  | { kind: "revise" };
+
+export type EndOutcome =
+  /** No tracked checkpoint, or a proven different run; nothing changed. */
+  | { kind: "unrelated" }
+  /** Proven same-run identity; the entry was removed. */
+  | { kind: "cleaned" }
+  /**
+   * The ending run could not prove it is the tracked one (at least one side
+   * has no run id). The entry is retained and marked as an end-observed
+   * terminal candidate so missing identity can never silently disarm a
+   * pending checkpoint; the caller should surface this as a content-free
+   * signal.
+   */
+  | { kind: "retained_unproven" };
 
 /** Subset of the agent hook context this policy reads. */
 export type CheckpointRunContext = {
@@ -408,17 +441,26 @@ export class CheckpointReceiptTracker {
     return { sessionKey, entry };
   }
 
-  /** Evict entries beyond the size cap: stale tombstones first, then oldest. */
+  /**
+   * Evict entries beyond the size cap: stale tombstones first, then
+   * end-observed terminal candidates, then the oldest fresh entry.
+   */
   private enforceCap(): void {
     while (this.entries.size > MAX_TRACKED_CHECKPOINTS) {
       let victim: string | undefined;
+      let endCandidate: string | undefined;
+      let oldest: string | undefined;
       for (const [key, entry] of this.entries) {
         if (entry.stale) {
           victim = key;
           break;
         }
-        victim ??= key;
+        if (entry.endObserved) {
+          endCandidate ??= key;
+        }
+        oldest ??= key;
       }
+      victim ??= endCandidate ?? oldest;
       if (victim === undefined) {
         break;
       }
@@ -440,10 +482,14 @@ export class CheckpointReceiptTracker {
    * and also stays untouched.
    *
    * Re-registration semantics: a registration that proves the same run id as
-   * the live tracked entry is idempotent (receipt and revise state are
-   * preserved); one that cannot prove it drops tracking for the session key
-   * entirely (fail open). A stale tombstone never blocks a new registration;
-   * displacing one counts as an eviction so it stays observable.
+   * the live tracked entry is idempotent (receipt state is preserved, and
+   * the entry is provably live again, so any end-observed mark is cleared);
+   * one that cannot prove it drops tracking for the session key entirely
+   * (fail open). A stale tombstone or an end-observed terminal candidate
+   * never blocks a new registration - some run on the session key has
+   * already ended without provable identity, so the ambiguity rule does not
+   * apply - and displacing either counts as an eviction so it stays
+   * observable.
    */
   register(prompt: unknown, ctx: CheckpointRunContext): RegisterOutcome {
     this.prune();
@@ -475,18 +521,25 @@ export class CheckpointReceiptTracker {
     const existing = this.entries.get(sessionKey);
     if (existing !== undefined && !existing.stale) {
       if (runId !== undefined && existing.runId === runId) {
-        // Provably the same run re-registering: idempotent, keep state.
+        // Provably the same run re-registering: idempotent, keep state. The
+        // run is provably live, so any earlier unproven end was not its own.
+        existing.endObserved = false;
         return { kind: "registered" };
       }
-      // Two live registrations on one session key that cannot prove they are
-      // the same run cannot be told apart at message_sent time (outbound
-      // hooks correlate by session key only), so neither is guarded: drop
-      // the pending entry and track nothing.
-      this.entries.delete(sessionKey);
-      return { kind: "ambiguous" };
+      if (!existing.endObserved) {
+        // Two live registrations on one session key that cannot prove they
+        // are the same run cannot be told apart at message_sent time
+        // (outbound hooks correlate by session key only), so neither is
+        // guarded: drop the pending entry and track nothing.
+        this.entries.delete(sessionKey);
+        return { kind: "ambiguous" };
+      }
     }
     if (existing !== undefined) {
-      // A stale tombstone is disarmed state; replacing it is an eviction.
+      // A stale tombstone is disarmed state, and an end-observed terminal
+      // candidate belongs to a run that has most likely already ended;
+      // replacing either is an eviction, never an ambiguity drop - this is
+      // what keeps consecutive id-less checkpoints guarded.
       this.entries.delete(sessionKey);
       this.evictions += 1;
     }
@@ -496,9 +549,9 @@ export class CheckpointReceiptTracker {
       channel: channel.toLowerCase(),
       conversation: normalizeConversationTarget(conversation, channel),
       receiptConfirmed: false,
-      reviseAttempts: 0,
       registeredAtMs: this.now(),
       stale: false,
+      endObserved: false,
     });
     this.enforceCap();
     return { kind: "registered" };
@@ -551,19 +604,23 @@ export class CheckpointReceiptTracker {
   /**
    * Evaluate one `before_agent_finalize` for the given mode.
    *
-   * Revise rounds are bounded per checkpoint, and the counter counts
-   * *requested* rounds. The installed host merges finalize results across
-   * plugins (`mergeBeforeAgentFinalize`: another plugin's `finalize` wins
-   * over this guard's `revise`) and acknowledges nothing back to handlers,
-   * so a requested round is not always an applied one. The host's own retry
-   * accounting (`normalizeBeforeAgentFinalizeResult`, keyed by run id and
-   * this guard's idempotency key, charged only when a revise decision wins
-   * the merge) is the authoritative bound on *applied* rounds. When another
-   * plugin's decision wins, this guard under-requests rather than
-   * over-revises - it degrades toward finalizing without a receipt, which is
-   * this repository's fail-open direction, and the miss is still recorded
-   * loudly through the `exhausted` outcome. The target-build smoke pins both
-   * sides of this contract.
+   * Enforce mode requests the same bounded, idempotent revise on every
+   * receipt-less round; this module keeps no local revise budget. The
+   * installed host merges finalize results across plugins
+   * (`mergeBeforeAgentFinalize`: another plugin's `finalize` wins over this
+   * guard's `revise`) and acknowledges nothing back to handlers, so a
+   * plugin-local requested counter cannot tell an applied round from an
+   * overridden one - it would let another plugin's winning decisions consume
+   * this guard's effective budget and stop it from ever revising. The
+   * authoritative bound on *applied* rounds is the host's own retry
+   * accounting (`normalizeBeforeAgentFinalizeResult`): it charges the
+   * per-(`event.runId ?? event.sessionId ?? "unknown-run"`,
+   * idempotency-key) budget only when a revise decision wins the merge, and
+   * turns further winning requests into plain continuation once
+   * `retry.maxAttempts` applied rounds are spent - so requesting every round
+   * is bounded even for id-less runs, overridden requests are never charged,
+   * and the run always eventually finalizes. The target-build smoke pins
+   * both sides of this contract.
    */
   finalize(
     correlation: CheckpointCorrelation,
@@ -585,36 +642,39 @@ export class CheckpointReceiptTracker {
     if (mode !== "enforce") {
       return { kind: "observed_missing" };
     }
-    if (entry.reviseAttempts >= MAX_RECEIPT_REVISE_ATTEMPTS) {
-      return { kind: "exhausted" };
-    }
-    entry.reviseAttempts += 1;
-    return { kind: "revise", attempt: entry.reviseAttempts };
+    return { kind: "revise" };
   }
 
   /**
-   * Deterministic cleanup on `agent_end` and other terminal paths. The entry
-   * is removed only when the ending run's identity *exactly agrees* with the
-   * tracked one: both run ids present and equal, or both absent (the pinned
-   * host derives both hook contexts from the same run params, so matching
-   * absence is the same-run shape). A run that carries a different id - or
-   * that cannot prove identity because exactly one side carries an id -
-   * never disarms a pending checkpoint; such entries stay bounded by the
-   * TTL tombstone and the size cap instead.
+   * Cleanup on `agent_end` and other terminal paths. The entry is removed
+   * only on *proof* of same-run identity: both run ids present and equal.
+   * Matching absence is not proof - an unrelated id-less run ending on the
+   * same session key is indistinguishable from the tracked id-less run - so
+   * an end that cannot prove identity (at least one side id-less) never
+   * deletes; it marks the entry as an end-observed terminal candidate that
+   * keeps guarding and stays bounded through observable displacement by the
+   * next registration, preferred cap eviction, and the TTL tombstone. A
+   * proven-different run id changes nothing.
    */
-  end(correlation: CheckpointCorrelation): void {
+  end(correlation: CheckpointCorrelation): EndOutcome {
     this.prune();
     const sessionKey = nonBlank(correlation.sessionKey);
     if (sessionKey === undefined) {
-      return;
+      return { kind: "unrelated" };
     }
     const entry = this.entries.get(sessionKey);
     if (entry === undefined) {
-      return;
+      return { kind: "unrelated" };
     }
-    if (entry.runId !== nonBlank(correlation.runId)) {
-      return;
+    const runId = nonBlank(correlation.runId);
+    if (entry.runId !== undefined && runId !== undefined) {
+      if (entry.runId !== runId) {
+        return { kind: "unrelated" };
+      }
+      this.entries.delete(sessionKey);
+      return { kind: "cleaned" };
     }
-    this.entries.delete(sessionKey);
+    entry.endObserved = true;
+    return { kind: "retained_unproven" };
   }
 }

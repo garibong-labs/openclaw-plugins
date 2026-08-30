@@ -335,7 +335,7 @@ describe("tracker eligibility", () => {
     assert.equal(tracker.size, 0);
   });
 
-  it("keeps receipt and revise state across a provable same-run re-registration", () => {
+  it("keeps receipt state across a provable same-run re-registration", () => {
     const tracker = new CheckpointReceiptTracker();
     tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
     assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "revise");
@@ -356,17 +356,16 @@ describe("tracker eligibility", () => {
       "receipt_confirmed",
     );
 
-    // Revise budget also survives re-registration.
-    const budgetTracker = new CheckpointReceiptTracker();
-    budgetTracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
-    assert.deepEqual(budgetTracker.finalize(FINALIZE_KEY, "enforce"), {
+    // A pending checkpoint still revises after re-registration; there is no
+    // local budget to reset (the host's per-run accounting is authoritative).
+    const pendingTracker = new CheckpointReceiptTracker();
+    pendingTracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    assert.deepEqual(pendingTracker.finalize(FINALIZE_KEY, "enforce"), {
       kind: "revise",
-      attempt: 1,
     });
-    budgetTracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
-    assert.deepEqual(budgetTracker.finalize(FINALIZE_KEY, "enforce"), {
+    pendingTracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    assert.deepEqual(pendingTracker.finalize(FINALIZE_KEY, "enforce"), {
       kind: "revise",
-      attempt: 2,
     });
   });
 });
@@ -562,24 +561,27 @@ describe("tracker finalize decisions", () => {
     assert.deepEqual(tracker.finalize(FINALIZE_KEY, "observe"), {
       kind: "observed_missing",
     });
-    // Observe mode never consumes revise budget.
+    // Observe mode never revises, no matter how many rounds pass.
     assert.deepEqual(tracker.finalize(FINALIZE_KEY, "observe"), {
       kind: "observed_missing",
     });
   });
 
-  it("bounds enforce-mode revise rounds and then reports exhaustion", () => {
+  it("keeps requesting the idempotent revise without local budget accounting", () => {
+    // The installed host merges finalize results across plugins without
+    // acknowledging which decision won, so a local requested-rounds budget
+    // would be consumed by other plugins' winning decisions. The guard
+    // therefore requests the same bounded revise on every receipt-less
+    // round and relies on the host's winning-decision accounting (charged
+    // only when this guard's revise wins the merge) to bound applied
+    // rounds - there is no plugin-authored exhausted state.
     const tracker = new CheckpointReceiptTracker();
     tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
-    for (let attempt = 1; attempt <= MAX_RECEIPT_REVISE_ATTEMPTS; attempt += 1) {
+    for (let round = 0; round < MAX_RECEIPT_REVISE_ATTEMPTS + 2; round += 1) {
       assert.deepEqual(tracker.finalize(FINALIZE_KEY, "enforce"), {
         kind: "revise",
-        attempt,
       });
     }
-    assert.deepEqual(tracker.finalize(FINALIZE_KEY, "enforce"), {
-      kind: "exhausted",
-    });
   });
 
   it("stays out of unrelated finalizations", () => {
@@ -601,12 +603,20 @@ describe("tracker finalize decisions", () => {
 });
 
 describe("tracker cleanup and bounds", () => {
-  it("cleans deterministically on agent end", () => {
+  it("cleans on agent end only with proven run identity", () => {
     const tracker = new CheckpointReceiptTracker();
     tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
-    tracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey, runId: "example-run-9" });
+    // A proven-different run id changes nothing.
+    assert.deepEqual(
+      tracker.end({
+        sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
+        runId: "example-run-9",
+      }),
+      { kind: "unrelated" },
+    );
     assert.equal(tracker.size, 1);
-    tracker.end(FINALIZE_KEY);
+    // Both ids present and equal is the only deleting shape.
+    assert.deepEqual(tracker.end(FINALIZE_KEY), { kind: "cleaned" });
     assert.equal(tracker.size, 0);
     assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "unrelated");
   });
@@ -615,23 +625,107 @@ describe("tracker cleanup and bounds", () => {
     // Tracked run carries an id; an end without one cannot prove identity.
     const tracker = new CheckpointReceiptTracker();
     tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
-    tracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey });
+    assert.deepEqual(
+      tracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey }),
+      { kind: "retained_unproven" },
+    );
     assert.equal(tracker.size, 1);
+    assert.equal(tracker.finalize(FINALIZE_KEY, "enforce").kind, "revise");
 
-    // Tracked run has no id; an end carrying one cannot prove identity
-    // either. Matching absence is the same-run shape and cleans up.
+    // Tracked run has no id: neither an id-carrying end nor an id-less end
+    // can prove identity - matching absence is NOT proof of the same run.
     const idlessTracker = new CheckpointReceiptTracker();
     idlessTracker.register(OWNER_CHECKPOINT_PROMPT, {
       ...CHECKPOINT_RUN_CONTEXT,
       runId: undefined,
     });
-    idlessTracker.end({
-      sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
-      runId: "example-run-9",
-    });
+    assert.deepEqual(
+      idlessTracker.end({
+        sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
+        runId: "example-run-9",
+      }),
+      { kind: "retained_unproven" },
+    );
     assert.equal(idlessTracker.size, 1);
-    idlessTracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey });
-    assert.equal(idlessTracker.size, 0);
+    assert.deepEqual(
+      idlessTracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey }),
+      { kind: "retained_unproven" },
+    );
+    assert.equal(idlessTracker.size, 1);
+  });
+
+  it("keeps guarding an id-less checkpoint through an unrelated id-less end", () => {
+    // The concrete interleaving: id-less checkpoint A is tracked, an
+    // unrelated id-less run B ends on the same session key, and A must
+    // remain guarded - its receipt still confirms and its finalize still
+    // enforces.
+    const idlessKey = { sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey };
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, {
+      ...CHECKPOINT_RUN_CONTEXT,
+      runId: undefined,
+    });
+    assert.deepEqual(tracker.end(idlessKey), { kind: "retained_unproven" });
+    assert.equal(tracker.finalize(idlessKey, "enforce").kind, "revise");
+    assert.equal(
+      tracker.recordSend(successfulSend(CHECKPOINT_SEND_CONTEXT)).kind,
+      "receipt",
+    );
+    assert.equal(
+      tracker.finalize(idlessKey, "enforce").kind,
+      "receipt_confirmed",
+    );
+  });
+
+  it("resolves an id-less checkpoint's own end through observable displacement", () => {
+    // An id-less checkpoint's own terminal cleanup cannot be proven either,
+    // so the entry stays as an end-observed terminal candidate. The next
+    // registration then displaces it as an observable eviction instead of
+    // an ambiguity drop - consecutive id-less checkpoints stay guarded.
+    const withoutRunId = { ...CHECKPOINT_RUN_CONTEXT, runId: undefined };
+    const idlessKey = { sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey };
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, withoutRunId);
+    assert.deepEqual(tracker.end(idlessKey), { kind: "retained_unproven" });
+    assert.equal(tracker.size, 1);
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, withoutRunId).kind,
+      "registered",
+    );
+    assert.equal(tracker.size, 1);
+    assert.equal(tracker.takeEvictions(), 1);
+    assert.equal(tracker.finalize(idlessKey, "enforce").kind, "revise");
+  });
+
+  it("clears the end-observed mark when the tracked run proves it is live", () => {
+    const tracker = new CheckpointReceiptTracker();
+    tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT);
+    assert.equal(
+      tracker.recordSend(successfulSend(CHECKPOINT_SEND_CONTEXT)).kind,
+      "receipt",
+    );
+    // An unprovable end marks the entry, but the tracked run then proves it
+    // is still live by re-registering with its own id: idempotent, state
+    // kept, no eviction.
+    tracker.end({ sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey });
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, CHECKPOINT_RUN_CONTEXT).kind,
+      "registered",
+    );
+    assert.equal(tracker.takeEvictions(), 0);
+    assert.equal(
+      tracker.finalize(FINALIZE_KEY, "enforce").kind,
+      "receipt_confirmed",
+    );
+    // With the mark cleared, the entry is live again: an unprovable second
+    // registration is back to the ambiguity rule, not displacement.
+    assert.equal(
+      tracker.register(OWNER_CHECKPOINT_PROMPT, {
+        ...CHECKPOINT_RUN_CONTEXT,
+        runId: "example-run-2",
+      }).kind,
+      "ambiguous",
+    );
   });
 
   it("keeps guarding through interleaved unrelated ends", () => {
@@ -760,6 +854,40 @@ describe("tracker cleanup and bounds", () => {
     // The oldest fresh entry survived because the tombstone went first.
     assert.equal(
       staleFirst.finalize(
+        { sessionKey: "example-session-key-1", runId: "example-run-1" },
+        "enforce",
+      ).kind,
+      "revise",
+    );
+
+    // An end-observed terminal candidate is evicted before any fresh
+    // pending entry (after stale tombstones).
+    const endFirst = new CheckpointReceiptTracker();
+    endFirst.register(OWNER_CHECKPOINT_PROMPT, {
+      ...CHECKPOINT_RUN_CONTEXT,
+      sessionKey: "example-session-key-ended",
+      runId: "example-run-ended",
+    });
+    endFirst.end({ sessionKey: "example-session-key-ended" });
+    for (let index = 1; index <= MAX_TRACKED_CHECKPOINTS; index += 1) {
+      endFirst.register(OWNER_CHECKPOINT_PROMPT, {
+        ...CHECKPOINT_RUN_CONTEXT,
+        sessionKey: `example-session-key-${index}`,
+        runId: `example-run-${index}`,
+      });
+    }
+    assert.equal(endFirst.size, MAX_TRACKED_CHECKPOINTS);
+    assert.equal(endFirst.takeEvictions(), 1);
+    assert.equal(
+      endFirst.finalize(
+        { sessionKey: "example-session-key-ended", runId: "example-run-ended" },
+        "enforce",
+      ).kind,
+      "unrelated",
+    );
+    // The oldest fresh entry survived because the candidate went first.
+    assert.equal(
+      endFirst.finalize(
         { sessionKey: "example-session-key-1", runId: "example-run-1" },
         "enforce",
       ).kind,
@@ -992,6 +1120,58 @@ describe("receipt hook handlers", () => {
     assert.equal(evictionLines.length, 1);
   });
 
+  it("logs an unprovable agent end and keeps the checkpoint guarded", () => {
+    const { api, logs } = createFakeApi();
+    const handlers = createReceiptHookHandlers(
+      api,
+      new CheckpointReceiptTracker(),
+      ENFORCE_RECEIPT_CONFIG,
+    );
+    const { runId: _omittedRunId, ...idlessRunContext } =
+      CHECKPOINT_RUN_CONTEXT;
+    handlers.beforeAgentRun(
+      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+      idlessRunContext,
+    );
+    // An unrelated id-less run ends on the same session key: the retention
+    // is surfaced content-free, and the checkpoint still enforces.
+    handlers.agentEnd(
+      { messages: [], success: true },
+      { trigger: "cron", sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey },
+    );
+    assert.match(flatten(logs), new RegExp(ReasonCodes.ReceiptEndUnproven));
+    assert.equal(
+      handlers.beforeAgentFinalize(
+        {
+          sessionId: "example-session-id-1",
+          sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey,
+          stopHookActive: false,
+        },
+        { trigger: "cron", sessionKey: CHECKPOINT_RUN_CONTEXT.sessionKey },
+      )?.action,
+      "revise",
+    );
+    // A proven end (both ids equal) stays silent - no unproven signal.
+    const { api: cleanApi, logs: cleanLogs } = createFakeApi();
+    const cleanHandlers = createReceiptHookHandlers(
+      cleanApi,
+      new CheckpointReceiptTracker(),
+      ENFORCE_RECEIPT_CONFIG,
+    );
+    cleanHandlers.beforeAgentRun(
+      { prompt: OWNER_CHECKPOINT_PROMPT, messages: [] },
+      CHECKPOINT_RUN_CONTEXT,
+    );
+    cleanHandlers.agentEnd(
+      { runId: CHECKPOINT_RUN_CONTEXT.runId, messages: [], success: true },
+      CHECKPOINT_RUN_CONTEXT,
+    );
+    assert.equal(
+      flatten(cleanLogs).includes(ReasonCodes.ReceiptEndUnproven),
+      false,
+    );
+  });
+
   it("returns a bounded revise result in enforce mode", () => {
     const { api, logs } = createFakeApi();
     const handlers = createReceiptHookHandlers(
@@ -1030,17 +1210,25 @@ describe("receipt hook handlers", () => {
       .split("\n")
       .filter((line) => line.includes(ReasonCodes.ReceiptReviseRequested));
     assert.equal(reviseLines.length, 1);
-    // Second revise round is still within the bound; the third is not.
+    // The guard keeps no local budget: it requests the same idempotent
+    // revise on every receipt-less round and never authors a false
+    // exhausted signal - the installed host's winning-decision accounting
+    // is the only bound on applied rounds.
+    for (let round = 0; round < MAX_RECEIPT_REVISE_ATTEMPTS + 1; round += 1) {
+      assert.equal(
+        handlers.beforeAgentFinalize(finalizeEvent, CHECKPOINT_RUN_CONTEXT)
+          ?.action,
+        "revise",
+      );
+    }
     assert.equal(
-      handlers.beforeAgentFinalize(finalizeEvent, CHECKPOINT_RUN_CONTEXT)
-        ?.action,
-      "revise",
+      flatten(logs)
+        .split("\n")
+        .filter((line) => line.includes(ReasonCodes.ReceiptReviseRequested))
+        .length,
+      MAX_RECEIPT_REVISE_ATTEMPTS + 2,
     );
-    assert.equal(
-      handlers.beforeAgentFinalize(finalizeEvent, CHECKPOINT_RUN_CONTEXT),
-      undefined,
-    );
-    assert.match(flatten(logs), new RegExp(ReasonCodes.ReceiptReviseExhausted));
+    assert.equal(flatten(logs).includes("revise_exhausted"), false);
   });
 
   it("leaves an ordinary turn completely untouched", () => {
