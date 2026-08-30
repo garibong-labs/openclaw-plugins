@@ -1,8 +1,8 @@
 {
   "id": "acp-lifecycle-guard",
   "name": "ACP Lifecycle Guard",
-  "description": "Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and restricts agent-started ACP launch routes to the main agent.",
-  "version": "0.3.0",
+  "description": "Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, restricts agent-started ACP launch routes to the main agent, and tracks owner-checkpoint delivery receipts.",
+  "version": "0.4.0",
   "activation": {
     "onStartup": true,
     "onCapabilities": ["hook"]
@@ -25,6 +25,12 @@
         "type": "boolean",
         "default": true,
         "description": "Block recognized ACP launch routes when the hook context agent id is not exactly 'main'."
+      },
+      "ownerCheckpointReceiptMode": {
+        "type": "string",
+        "enum": ["observe", "enforce"],
+        "default": "observe",
+        "description": "Owner-checkpoint delivery-receipt completeness. 'observe' logs a missing publication receipt at finalize; 'enforce' additionally requests a bounded finalize revise requiring one explicit messaging-tool send to the original conversation. Independent of 'enforce': that toggle never activates this guard."
       },
       "maxIntermediateChars": {
         "type": "integer",
@@ -54,6 +60,10 @@
     "blockNonMainAcpLaunches": {
       "label": "Block non-main ACP launches",
       "advanced": true
+    },
+    "ownerCheckpointReceiptMode": {
+      "label": "Owner checkpoint receipt mode",
+      "help": "Default 'observe' only logs a missing checkpoint publication. Switch to 'enforce' as a deliberate operator rollout after an observe-mode soak."
     },
     "maxIntermediateChars": {
       "label": "Intermediate character ceiling",

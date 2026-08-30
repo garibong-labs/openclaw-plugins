@@ -243,6 +243,7 @@ describe("resolveGuardConfig", () => {
       enforce: false,
       blockDirectIntermediateToolCalls: false,
       blockNonMainAcpLaunches: false,
+      ownerCheckpointReceiptMode: "enforce",
       maxIntermediateChars: 900,
       maxBoundaryReportChars: 1800,
     });
@@ -250,6 +251,7 @@ describe("resolveGuardConfig", () => {
       enforce: false,
       blockDirectIntermediateToolCalls: false,
       blockNonMainAcpLaunches: false,
+      ownerCheckpointReceiptMode: "enforce",
       limits: { maxIntermediateChars: 900, maxBoundaryReportChars: 1800 },
     });
   });

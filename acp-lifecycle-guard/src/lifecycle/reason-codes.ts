@@ -52,6 +52,32 @@ export const ReasonCodes = {
 
   /** Recognized ACP launch route invoked by an agent other than `main`. */
   LaunchNonMainAgent: `${REASON_CODE_PREFIX}.launch.non_main_agent`,
+
+  /** Eligible owner checkpoint registered for delivery-receipt tracking. */
+  ReceiptCheckpointRegistered: `${REASON_CODE_PREFIX}.receipt.checkpoint_registered`,
+  /** Marker plus provenance matched, but correlation fields were missing or ambiguous. */
+  ReceiptUncorrelatable: `${REASON_CODE_PREFIX}.receipt.uncorrelatable`,
+  /** Trusted cron prompt carries a near-miss of the checkpoint marker. */
+  ReceiptMarkerDrift: `${REASON_CODE_PREFIX}.receipt.marker_drift`,
+  /** Exact-destination successful send receipt confirmed. */
+  ReceiptConfirmed: `${REASON_CODE_PREFIX}.receipt.confirmed`,
+  /** Successful send from an eligible checkpoint run to a different destination. */
+  ReceiptTargetMismatch: `${REASON_CODE_PREFIX}.receipt.target_mismatch`,
+  /** Correlated successful send whose destination metadata cannot be verified. */
+  ReceiptTargetUnverifiable: `${REASON_CODE_PREFIX}.receipt.target_unverifiable`,
+  /** Eligible checkpoint reached finalize without a publication receipt. */
+  ReceiptMissing: `${REASON_CODE_PREFIX}.receipt.missing`,
+  /** Tracked checkpoint outlived the TTL and reached finalize with no receipt. */
+  ReceiptStaleMissing: `${REASON_CODE_PREFIX}.receipt.stale_missing`,
+  /** Bounded-state pressure removed tracked checkpoint entries. */
+  ReceiptEvicted: `${REASON_CODE_PREFIX}.receipt.evicted`,
+  /** Enforce mode requested a bounded finalize revise round. */
+  ReceiptReviseRequested: `${REASON_CODE_PREFIX}.receipt.revise_requested`,
+  /**
+   * An agent end on a tracked session key could not prove run identity; the
+   * entry is retained as a bounded end-observed terminal candidate.
+   */
+  ReceiptEndUnproven: `${REASON_CODE_PREFIX}.receipt.end_unproven`,
 } as const;
 
 export type ReasonCode = (typeof ReasonCodes)[keyof typeof ReasonCodes];

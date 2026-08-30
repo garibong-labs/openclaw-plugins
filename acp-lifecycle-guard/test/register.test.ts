@@ -74,11 +74,18 @@ const MALFORMED_INTERMEDIATE = replaceLine(
 );
 
 describe("registerGuard", () => {
-  it("registers both required hooks exactly once", () => {
+  it("registers every required hook exactly once", () => {
     const { api, registrations } = createFakeApi();
     registerGuard(api);
     const names = registrations.map((entry) => entry.hookName).sort();
-    assert.deepEqual(names, ["before_tool_call", "message_sending"]);
+    assert.deepEqual(names, [
+      "agent_end",
+      "before_agent_finalize",
+      "before_agent_run",
+      "before_tool_call",
+      "message_sending",
+      "message_sent",
+    ]);
   });
 
   it("registers message_sending at a late priority", () => {
