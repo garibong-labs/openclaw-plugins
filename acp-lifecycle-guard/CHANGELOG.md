@@ -8,16 +8,32 @@ plugin is versioned independently of the repository and follows
 
 ### Fixed
 
-- The canonical intermediate elapsed line now matches the live
-  `acp-progress-reporting` contract's activity label: only
-  `⏱ **ACP 시간**: 전체 <N>분 · 현재 단계 <N>분 · 마지막 ACP 활동 <N>분 전`
-  is accepted, and the legacy `마지막 변화` label is rejected with the
-  existing `acp_lifecycle_guard.intermediate.elapsed_drift` reason. The
-  previous release had the two labels inverted, so every live canonical
-  intermediate report was cancelled as elapsed drift. The activity-age
-  segment remains structurally independent of the `새 결과` delta bullet:
-  `Δ0` alongside a recent activity age stays valid, and no semantic coupling
-  between the two fields is inferred. Shape validation only; no scope change.
+- The intermediate elapsed line now accepts the live `acp-progress-reporting`
+  contract's activity label
+  (`⏱ **ACP 시간**: 전체 <N>분 · 현재 단계 <N>분 · 마지막 ACP 활동 <N>분 전`,
+  contract revision 2026-08-31). Every release from 0.1.0 through 0.4.2
+  required the pre-revision `마지막 변화` label instead, so once the
+  reporting skill shipped the revised label, every live canonical
+  intermediate report was cancelled with
+  `acp_lifecycle_guard.intermediate.elapsed_drift`. Shape validation only;
+  no scope change.
+- The legacy `마지막 변화` label remains accepted as a transition window, so
+  hosts still emitting the pre-revision label are not cancelled either. A
+  valid report using the legacy label passes and is surfaced with the new
+  content-free info signal
+  `acp_lifecycle_guard.intermediate.legacy_activity_label`; the legacy
+  alternative will be removed once every reporting host emits the revised
+  label.
+- The three minute counters in the elapsed line reject leading zeros: `0`
+  and ordinary positive integers are valid, while `00분`, `007분`, and
+  `08분` are elapsed drift.
+
+### Added
+
+- New stable reason code
+  `acp_lifecycle_guard.intermediate.legacy_activity_label`. Advisory only:
+  it appears in a single info-level log line for a passing report and is
+  never a cancel reason.
 
 ## [0.4.2] - 2026-08-31
 

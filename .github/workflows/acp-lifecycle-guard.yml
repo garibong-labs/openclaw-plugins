@@ -6,12 +6,15 @@ on:
     paths:
       - "acp-lifecycle-guard/**"
       - "marketplace.json"
+      # Root README carries the plugin catalog table the marketplace job checks.
+      - "README.md"
       - "scripts/check-marketplace.mjs"
       - ".github/workflows/acp-lifecycle-guard.yml"
   pull_request:
     paths:
       - "acp-lifecycle-guard/**"
       - "marketplace.json"
+      - "README.md"
       - "scripts/check-marketplace.mjs"
       - ".github/workflows/acp-lifecycle-guard.yml"
   workflow_dispatch:

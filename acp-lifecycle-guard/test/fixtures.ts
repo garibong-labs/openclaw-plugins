@@ -6,6 +6,14 @@
  * this repository.
  */
 
+import { INTERMEDIATE_ELAPSED_LINE_INDEX } from "../src/lifecycle/layouts.ts";
+
+/**
+ * Line index of the `⏱ **ACP 시간**` elapsed line in an intermediate report,
+ * re-exported from the layout so tests share the structural source of truth.
+ */
+export { INTERMEDIATE_ELAPSED_LINE_INDEX };
+
 export const CANONICAL_INTERMEDIATE = [
   "🔄 **ACP 중간 보고 · 14:20 KST**",
   "",
@@ -184,6 +192,27 @@ export function completionWithDuration(duration: string): string {
 /** Completion report in the minute-plus-seconds form production emits. */
 export const CANONICAL_COMPLETION_WITH_SECONDS =
   completionWithDuration("17분 31초");
+
+/** Intermediate report whose elapsed line is `elapsedLine` verbatim. */
+export function intermediateWithElapsed(elapsedLine: string): string {
+  return replaceLine(
+    CANONICAL_INTERMEDIATE,
+    INTERMEDIATE_ELAPSED_LINE_INDEX,
+    elapsedLine,
+  );
+}
+
+/**
+ * Valid intermediate report still using the transition-window legacy activity
+ * label; it passes with the `intermediate.legacy_activity_label` advisory.
+ */
+export const LEGACY_ACTIVITY_INTERMEDIATE = intermediateWithElapsed(
+  "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분 · 마지막 변화 2분 전",
+);
+
+/** Ordinary chat that merely mentions both activity labels. */
+export const ACTIVITY_LABEL_CHAT =
+  "보고 서식의 마지막 변화 표기는 이제 마지막 ACP 활동 표기로 바뀌었습니다.";
 
 /** Synthetic shell command that invokes a canonical ACP launch entrypoint. */
 export const ACP_LAUNCH_COMMAND =

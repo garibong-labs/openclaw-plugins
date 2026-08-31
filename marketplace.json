@@ -1,6 +1,6 @@
 {
   "name": "garibong-labs",
-  "version": "0.4.3",
+  "version": "0.4.2",
   "plugins": [
     {
       "name": "openclaw-acp-lifecycle-guard",

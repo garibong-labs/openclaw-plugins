@@ -19,9 +19,11 @@ import {
   ACP_LAUNCH_COMMAND,
   CANONICAL_COMPLETION,
   CANONICAL_INTERMEDIATE,
+  LEGACY_ACTIVITY_INTERMEDIATE,
   ORDINARY_CHAT,
   ORDINARY_COMMAND,
   RENAMED_COMPLETION_TITLE,
+  intermediateWithElapsed,
   replaceLine,
 } from "./fixtures.ts";
 
@@ -68,11 +70,7 @@ function createFakeApi(pluginConfig?: Record<string, unknown>): {
 const MESSAGE_CONTEXT = { channelId: "test-channel" } as const;
 const TOOL_CONTEXT = { toolName: "message" } as const;
 
-const MALFORMED_INTERMEDIATE = replaceLine(
-  CANONICAL_INTERMEDIATE,
-  5,
-  "⏱️ **ACP 시간**: 20분",
-);
+const MALFORMED_INTERMEDIATE = intermediateWithElapsed("⏱️ **ACP 시간**: 20분");
 
 describe("registerGuard", () => {
   it("registers lifecycle and receipt hooks without before_tool_call", () => {
@@ -119,6 +117,18 @@ describe("message_sending handler", () => {
       handler({ to: "target", content: CANONICAL_COMPLETION }, MESSAGE_CONTEXT),
       undefined,
     );
+  });
+
+  it("passes a legacy-activity-label report with one advisory log line", () => {
+    const { api, logs } = createFakeApi();
+    const handler = createMessageSendingHandler(api, DEFAULT_GUARD_CONFIG);
+    const result = handler(
+      { to: "target", content: LEGACY_ACTIVITY_INTERMEDIATE },
+      MESSAGE_CONTEXT,
+    );
+    assert.equal(result, undefined);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0]?.level, "info");
   });
 
   it("cancels a malformed report with a stable reason code", () => {
@@ -375,6 +385,34 @@ describe("logging never carries raw outbound content", () => {
     assert.match(
       flatten(logs),
       /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=completion reason=acp_lifecycle_guard\.completion\.next_line_drift$/u,
+    );
+  });
+
+  it("omits message content when passing a legacy-label report with an advisory", () => {
+    const { api, logs } = createFakeApi();
+    const handler = createMessageSendingHandler(api, DEFAULT_GUARD_CONFIG);
+    const tainted = replaceLine(
+      LEGACY_ACTIVITY_INTERMEDIATE,
+      12,
+      `- ${SECRET_MARKER}`,
+    );
+    const result = handler(
+      { to: SECRET_MARKER, content: tainted },
+      MESSAGE_CONTEXT,
+    );
+
+    assert.equal(result, undefined);
+    assert.equal(logs.length, 1);
+    const flattened = flatten(logs);
+    assert.equal(flattened.includes(SECRET_MARKER), false);
+    for (const line of tainted.split("\n")) {
+      if (line.trim().length > 0) {
+        assert.equal(flattened.includes(line), false);
+      }
+    }
+    assert.match(
+      flattened,
+      /^\[acp-lifecycle-guard\] hook=message_sending outcome=passed kind=intermediate reason=acp_lifecycle_guard\.intermediate\.legacy_activity_label$/u,
     );
   });
 
