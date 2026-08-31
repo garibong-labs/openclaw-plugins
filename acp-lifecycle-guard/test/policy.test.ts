@@ -6,12 +6,14 @@ import { ReasonCodes } from "../src/lifecycle/reason-codes.ts";
 import { evaluateOutboundContent } from "../src/policy/outbound.ts";
 import { evaluateToolCall } from "../src/policy/tool.ts";
 import {
+  ACTIVITY_LABEL_CHAT,
   APPROVAL_EVIDENCE,
   CANONICAL_COMPLETION,
   CANONICAL_COMPLETION_WITH_SECONDS,
   CANONICAL_CORRECTION_START,
   CANONICAL_INTERMEDIATE,
   CANONICAL_START,
+  LEGACY_ACTIVITY_INTERMEDIATE,
   ORDINARY_CHAT,
   ORCHESTRATOR_TERMINAL_COMPLETION,
   RENAMED_COMPLETION_TITLE,
@@ -19,14 +21,11 @@ import {
   RENAMED_INTERMEDIATE_TITLE,
   RENAMED_START_TITLE,
   completionWithDuration,
+  intermediateWithElapsed,
   replaceLine,
 } from "./fixtures.ts";
 
-const MALFORMED_INTERMEDIATE = replaceLine(
-  CANONICAL_INTERMEDIATE,
-  5,
-  "⏱️ **ACP 시간**: 20분",
-);
+const MALFORMED_INTERMEDIATE = intermediateWithElapsed("⏱️ **ACP 시간**: 20분");
 
 describe("evaluateOutboundContent", () => {
   it("passes ordinary chat", () => {
@@ -39,6 +38,24 @@ describe("evaluateOutboundContent", () => {
     assert.deepEqual(
       evaluateOutboundContent(APPROVAL_EVIDENCE, DEFAULT_GUARD_CONFIG),
       { action: "pass" },
+    );
+  });
+
+  it("passes ordinary chat that mentions both activity labels untouched", () => {
+    assert.deepEqual(
+      evaluateOutboundContent(ACTIVITY_LABEL_CHAT, DEFAULT_GUARD_CONFIG),
+      { action: "pass" },
+    );
+  });
+
+  it("passes a legacy-activity-label report with the transition advisory", () => {
+    assert.deepEqual(
+      evaluateOutboundContent(LEGACY_ACTIVITY_INTERMEDIATE, DEFAULT_GUARD_CONFIG),
+      {
+        action: "pass",
+        kind: "intermediate",
+        advisories: [ReasonCodes.IntermediateLegacyActivityLabel],
+      },
     );
   });
 

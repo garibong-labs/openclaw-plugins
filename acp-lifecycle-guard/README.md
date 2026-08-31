@@ -46,8 +46,11 @@ The guard rejects:
 - title drift, including an invalid clock value;
 - metadata drift, reordering, or a model/repository/branch value that is not
   inline code;
-- the early legacy elapsed-only line (`⏱ **ACP 시간**: 20분`) instead of the
-  current total / current-stage / last-change form;
+- the early legacy elapsed-only line (`⏱ **ACP 시간**: 20분`), an
+  unrecognized activity label, and leading-zero minute counters (`00분`,
+  `007분`) in the total / current-stage / last-ACP-activity
+  (`마지막 ACP 활동 <N>분 전`) elapsed line; the activity-age segment is
+  validated as shape only, independent of the `새 결과` delta bullet;
 - completion durations outside the canonical `<n>분` and `<n>분 <s>초` forms -
   both are valid, but seconds are bounded to `0`-`59`, so `17분 60초`,
   `17분 31`, and `17분31초` are drift;
@@ -63,6 +66,16 @@ The guard rejects:
 
 The optional `⚠ **이슈**` section is preserved exactly where the intermediate
 contract permits it: as the trailing section, with one bullet, and nowhere else.
+
+**Activity-label transition window.** The elapsed line's activity label
+follows the `acp-progress-reporting` contract revision of 2026-08-31
+(`마지막 ACP 활동`). The pre-revision `마지막 변화` label is still accepted in
+this release so hosts that have not yet picked up the revised reporting skill
+are not cancelled; a valid report using the legacy label passes untouched and
+emits one info-level, content-free log line with
+`acp_lifecycle_guard.intermediate.legacy_activity_label`. The legacy
+alternative will be removed once every reporting host emits the revised
+label.
 
 ### Codex approval compatibility
 

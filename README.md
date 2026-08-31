@@ -9,7 +9,7 @@ root doubles as an OpenClaw remote marketplace.
 
 | Plugin                         | Directory              | Plugin id             | Version | What it does                                                                                                                       |
 | ------------------------------ | ---------------------- | --------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `openclaw-acp-lifecycle-guard` | `acp-lifecycle-guard/` | `acp-lifecycle-guard` | 0.4.2   | Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and tracks owner-checkpoint delivery receipts. |
+| `openclaw-acp-lifecycle-guard` | `acp-lifecycle-guard/` | `acp-lifecycle-guard` | 0.4.3   | Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and tracks owner-checkpoint delivery receipts. |
 
 ## Install from the marketplace
 

@@ -45,6 +45,37 @@ const bullet = (): LineSpec => ({
   code: ReasonCodes.BulletLineDrift,
 });
 
+/** Minute counter: `0` or a positive integer without leading zeros. */
+const MINUTES_SOURCE = "(?:0|[1-9][0-9]*)";
+
+/**
+ * Intermediate elapsed line.
+ *
+ * Contract source: the `acp-progress-reporting` skill's intermediate cadence
+ * layout, whose activity label was revised from `마지막 변화` to
+ * `마지막 ACP 활동` on 2026-08-31. Both labels are accepted for this
+ * transition release so hosts still emitting the pre-revision label are not
+ * cancelled; a valid report using the legacy label is surfaced with the
+ * content-free `intermediate.legacy_activity_label` signal (see
+ * `INTERMEDIATE_LEGACY_ACTIVITY_LABEL`). Drop the legacy alternative once
+ * every reporting host emits the revised label. The early legacy elapsed-only
+ * line (`⏱ **ACP 시간**: 12분`) and leading-zero minute counters stay drift.
+ */
+const INTERMEDIATE_ELAPSED_LINE_SPEC: LineSpec = {
+  kind: "pattern",
+  source: `^⏱ \\*\\*ACP 시간\\*\\*: 전체 ${MINUTES_SOURCE}분 · 현재 단계 ${MINUTES_SOURCE}분 · (?:마지막 ACP 활동|마지막 변화) ${MINUTES_SOURCE}분 전$`,
+  code: ReasonCodes.IntermediateElapsedDrift,
+};
+
+/**
+ * Transition-window detector for the legacy activity label. Applied only to
+ * an elapsed line that already matched `INTERMEDIATE_ELAPSED_LINE_SPEC`.
+ */
+export const INTERMEDIATE_LEGACY_ACTIVITY_LABEL = /마지막 변화/u;
+
+/** The `새 결과` delta bullet; its exact grammar is enforced in `validate.ts`. */
+const INTERMEDIATE_DELTA_BULLET_SPEC: LineSpec = bullet();
+
 const blank = (): LineSpec => ({ kind: "blank" });
 
 const heading = (text: string): LineSpec => ({
@@ -81,13 +112,7 @@ export const INTERMEDIATE_LAYOUT: readonly LineSpec[] = [
     source: "^🔢 \\*\\*라운드\\*\\*: [1-9][0-9]* · [1-4]/4 \\S.*$",
     code: ReasonCodes.MetadataLineDrift,
   },
-  {
-    // Rejects the early legacy elapsed-only line such as `⏱ **ACP 시간**: 12분`.
-    kind: "pattern",
-    source:
-      "^⏱ \\*\\*ACP 시간\\*\\*: 전체 [0-9]+분 · 현재 단계 [0-9]+분 · 마지막 변화 [0-9]+분 전$",
-    code: ReasonCodes.IntermediateElapsedDrift,
-  },
+  INTERMEDIATE_ELAPSED_LINE_SPEC,
   {
     kind: "pattern",
     source: "^🔁 \\*\\*실행 상태\\*\\*: \\S.*$",
@@ -95,7 +120,7 @@ export const INTERMEDIATE_LAYOUT: readonly LineSpec[] = [
   },
   blank(),
   heading("✅ **새 결과**"),
-  bullet(),
+  INTERMEDIATE_DELTA_BULLET_SPEC,
   blank(),
   heading("🛠 **ACP 진행 중**"),
   bullet(),
@@ -114,8 +139,15 @@ export const INTERMEDIATE_ISSUE_TAIL: readonly LineSpec[] = [
   bullet(),
 ];
 
-/** Index of the `새 결과` bullet inside `INTERMEDIATE_LAYOUT`. */
-export const INTERMEDIATE_DELTA_BULLET_INDEX = 9;
+/** Line index of the elapsed line, derived from its named spec. */
+export const INTERMEDIATE_ELAPSED_LINE_INDEX = INTERMEDIATE_LAYOUT.indexOf(
+  INTERMEDIATE_ELAPSED_LINE_SPEC,
+);
+
+/** Line index of the `새 결과` delta bullet, derived from its named spec. */
+export const INTERMEDIATE_DELTA_BULLET_INDEX = INTERMEDIATE_LAYOUT.indexOf(
+  INTERMEDIATE_DELTA_BULLET_SPEC,
+);
 
 const START_BODY: readonly LineSpec[] = [
   blank(),

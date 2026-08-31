@@ -28,8 +28,15 @@ export const ReasonCodes = {
   /** A section bullet is missing, nested, or not a single top-level bullet. */
   BulletLineDrift: `${REASON_CODE_PREFIX}.common.bullet_line_drift`,
 
-  /** Elapsed line is not the canonical total / current-stage / last-change form. */
+  /** Elapsed line is not the canonical total / current-stage / last-ACP-activity form. */
   IntermediateElapsedDrift: `${REASON_CODE_PREFIX}.intermediate.elapsed_drift`,
+  /**
+   * Valid intermediate report using the transition-window legacy activity
+   * label (`마지막 변화`). Advisory only: the report passes, and this code is
+   * never a cancel reason. Remove together with the legacy alternative in the
+   * elapsed-line pattern once every reporting host emits the revised label.
+   */
+  IntermediateLegacyActivityLabel: `${REASON_CODE_PREFIX}.intermediate.legacy_activity_label`,
   /** New-result bullet does not use the canonical `Δ0` or `Δ+N` marker. */
   IntermediateDeltaDrift: `${REASON_CODE_PREFIX}.intermediate.delta_drift`,
   /** Report uses a subject the intermediate contract forbids. */

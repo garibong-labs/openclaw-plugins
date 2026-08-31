@@ -11,8 +11,13 @@ import type { ReasonCode } from "../lifecycle/reason-codes.ts";
 import { validateLifecycleReport } from "../lifecycle/validate.ts";
 
 export type OutboundDecision =
-  /** Not a lifecycle candidate, or a candidate that matches its contract. */
-  | { action: "pass"; kind?: LifecycleKind }
+  /**
+   * Not a lifecycle candidate, or a candidate that matches its contract.
+   * `advisories` carries the validator's content-free observations about a
+   * passing report (e.g. the transition-window legacy activity label); they
+   * are logged but never affect delivery.
+   */
+  | { action: "pass"; kind?: LifecycleKind; advisories?: readonly ReasonCode[] }
   /** Malformed candidate; delivery must be cancelled. */
   | { action: "cancel"; kind: LifecycleKind; reasonCode: ReasonCode }
   /** Malformed candidate detected while enforcement is disabled. */
@@ -34,7 +39,13 @@ export function evaluateOutboundContent(
   });
 
   if (result.ok) {
-    return { action: "pass", kind: classification.kind };
+    return {
+      action: "pass",
+      kind: classification.kind,
+      ...(result.advisories === undefined
+        ? {}
+        : { advisories: result.advisories }),
+    };
   }
 
   return {

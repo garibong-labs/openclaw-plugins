@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { classifyLifecycleContent } from "../src/lifecycle/classify.ts";
 import type { LifecycleKind } from "../src/lifecycle/kinds.ts";
+import { INTERMEDIATE_DELTA_BULLET_INDEX } from "../src/lifecycle/layouts.ts";
 import { stripVariationSelectors } from "../src/lifecycle/normalize.ts";
 import {
   ALL_REASON_CODES,
@@ -21,6 +22,8 @@ import {
   CANONICAL_INTERMEDIATE,
   CANONICAL_INTERMEDIATE_WITH_ISSUE,
   CANONICAL_START,
+  INTERMEDIATE_ELAPSED_LINE_INDEX,
+  LEGACY_ACTIVITY_INTERMEDIATE,
   ORCHESTRATOR_TERMINAL_COMPLETION,
   RENAMED_COMPLETION_TITLE,
   RENAMED_CORRECTION_START_TITLE,
@@ -28,6 +31,7 @@ import {
   RENAMED_START_TITLE,
   completionWithDuration,
   insertLine,
+  intermediateWithElapsed,
   removeLine,
   replaceLine,
 } from "./fixtures.ts";
@@ -78,8 +82,43 @@ describe("valid canonical layouts", () => {
 
   it("accepts an intermediate report using a Δ+N new-result bullet", () => {
     expectValid(
-      replaceLine(CANONICAL_INTERMEDIATE, 9, "- Δ+2 게이트 2건 통과 확인"),
+      replaceLine(
+        CANONICAL_INTERMEDIATE,
+        INTERMEDIATE_DELTA_BULLET_INDEX,
+        "- Δ+2 게이트 2건 통과 확인",
+      ),
     );
+  });
+
+  it("accepts the activity age independently of the delta bullet in both directions", () => {
+    expectValid(
+      intermediateWithElapsed(
+        "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분 · 마지막 ACP 활동 0분 전",
+      ),
+    );
+    expectValid(
+      replaceLine(
+        intermediateWithElapsed(
+          "⏱️ **ACP 시간**: 전체 200분 · 현재 단계 8분 · 마지막 ACP 활동 180분 전",
+        ),
+        INTERMEDIATE_DELTA_BULLET_INDEX,
+        "- Δ+3 게이트 3건 통과 확인",
+      ),
+    );
+  });
+
+  it("accepts the transition-window legacy activity label with an advisory", () => {
+    const result = validate(LEGACY_ACTIVITY_INTERMEDIATE);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.ok ? result.advisories : undefined, [
+      ReasonCodes.IntermediateLegacyActivityLabel,
+    ]);
+  });
+
+  it("reports no advisory for the canonical activity label", () => {
+    const result = validate(CANONICAL_INTERMEDIATE);
+    assert.equal(result.ok, true);
+    assert.equal(result.ok ? result.advisories : undefined, undefined);
   });
 
   it("accepts the canonical start report", () => {
@@ -208,17 +247,22 @@ describe("intermediate drift", () => {
 
   it("rejects the early legacy elapsed-only line", () => {
     expectRejected(
-      replaceLine(CANONICAL_INTERMEDIATE, 5, "⏱️ **ACP 시간**: 20분"),
+      intermediateWithElapsed("⏱️ **ACP 시간**: 20분"),
       ReasonCodes.IntermediateElapsedDrift,
     );
   });
 
-  it("rejects an elapsed line missing the last-change segment", () => {
+  it("rejects an elapsed line missing the last-activity segment", () => {
     expectRejected(
-      replaceLine(
-        CANONICAL_INTERMEDIATE,
-        5,
-        "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분",
+      intermediateWithElapsed("⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분"),
+      ReasonCodes.IntermediateElapsedDrift,
+    );
+  });
+
+  it("rejects an unrecognized activity label", () => {
+    expectRejected(
+      intermediateWithElapsed(
+        "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분 · 마지막 활동 2분 전",
       ),
       ReasonCodes.IntermediateElapsedDrift,
     );
@@ -263,14 +307,22 @@ describe("intermediate drift", () => {
 
   it("rejects a new-result bullet without a delta marker", () => {
     expectRejected(
-      replaceLine(CANONICAL_INTERMEDIATE, 9, "- 새로운 결과 있음"),
+      replaceLine(
+        CANONICAL_INTERMEDIATE,
+        INTERMEDIATE_DELTA_BULLET_INDEX,
+        "- 새로운 결과 있음",
+      ),
       ReasonCodes.IntermediateDeltaDrift,
     );
   });
 
   it("rejects an altered Δ0 sentence", () => {
     expectRejected(
-      replaceLine(CANONICAL_INTERMEDIATE, 9, "- Δ0 · 새 결과 없음"),
+      replaceLine(
+        CANONICAL_INTERMEDIATE,
+        INTERMEDIATE_DELTA_BULLET_INDEX,
+        "- Δ0 · 새 결과 없음",
+      ),
       ReasonCodes.IntermediateDeltaDrift,
     );
   });
@@ -435,6 +487,60 @@ describe("completion duration grammar", () => {
       );
     });
   }
+});
+
+describe("intermediate elapsed grammar", () => {
+  const elapsed = (total: string, stage: string, activity: string): string =>
+    intermediateWithElapsed(
+      `⏱️ **ACP 시간**: 전체 ${total}분 · 현재 단계 ${stage}분 · 마지막 ACP 활동 ${activity}분 전`,
+    );
+
+  // Each minute counter is `0` or a positive integer without leading zeros.
+  const accepted: ReadonlyArray<[string, string, string]> = [
+    ["0", "0", "0"],
+    ["20", "8", "2"],
+    ["120", "10", "102"],
+  ];
+
+  for (const [total, stage, activity] of accepted) {
+    it(`accepts 전체 ${total}분 · 현재 단계 ${stage}분 · 마지막 ACP 활동 ${activity}분 전`, () => {
+      expectValid(elapsed(total, stage, activity));
+    });
+  }
+
+  const rejected: ReadonlyArray<[string, string, string]> = [
+    ["00", "8", "2"],
+    ["007", "8", "2"],
+    ["20", "08", "2"],
+    ["20", "8", "01"],
+  ];
+
+  for (const [total, stage, activity] of rejected) {
+    it(`rejects 전체 ${total}분 · 현재 단계 ${stage}분 · 마지막 ACP 활동 ${activity}분 전`, () => {
+      expectRejected(
+        elapsed(total, stage, activity),
+        ReasonCodes.IntermediateElapsedDrift,
+      );
+    });
+  }
+});
+
+describe("intermediate layout indices", () => {
+  // Regression guard: the exported indices are derived from named specs in
+  // the layout, so they must land on the expected canonical fixture lines.
+  const lines = CANONICAL_INTERMEDIATE.split("\n");
+
+  it("derives the elapsed line index from the layout structure", () => {
+    assert.match(
+      lines[INTERMEDIATE_ELAPSED_LINE_INDEX] ?? "",
+      /^⏱️ \*\*ACP 시간\*\*: /u,
+    );
+  });
+
+  it("derives the delta bullet index from the layout structure", () => {
+    assert.match(lines[INTERMEDIATE_DELTA_BULLET_INDEX] ?? "", /^- Δ/u);
+    assert.equal(lines[INTERMEDIATE_DELTA_BULLET_INDEX - 1], "✅ **새 결과**");
+  });
 });
 
 describe("reason code hygiene", () => {

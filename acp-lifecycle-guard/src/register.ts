@@ -80,6 +80,18 @@ export function createMessageSendingHandler(
     const decision = evaluateOutboundContent(content, config);
 
     if (decision.action === "pass") {
+      // A passing report may carry bounded content-free advisories (the
+      // transition-window legacy activity label); delivery stays untouched.
+      if (decision.kind !== undefined) {
+        for (const advisory of decision.advisories ?? []) {
+          logDecision(api.logger, "info", {
+            hook: "message_sending",
+            outcome: "passed",
+            kind: decision.kind,
+            reason: advisory,
+          });
+        }
+      }
       return;
     }
 

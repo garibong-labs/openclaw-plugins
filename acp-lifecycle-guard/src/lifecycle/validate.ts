@@ -13,8 +13,10 @@ import {
   COMPLETION_LAYOUT,
   CORRECTION_START_LAYOUT,
   INTERMEDIATE_DELTA_BULLET_INDEX,
+  INTERMEDIATE_ELAPSED_LINE_INDEX,
   INTERMEDIATE_ISSUE_TAIL,
   INTERMEDIATE_LAYOUT,
+  INTERMEDIATE_LEGACY_ACTIVITY_LABEL,
   START_LAYOUT,
   compileLayout,
   type CompiledLineSpec,
@@ -22,7 +24,12 @@ import {
 import { ReasonCodes, type ReasonCode } from "./reason-codes.ts";
 
 export type ValidationResult =
-  | { ok: true }
+  /**
+   * `advisories` carries content-free observations about a report that is
+   * nevertheless valid (currently only the transition-window legacy activity
+   * label). They never cause a rejection.
+   */
+  | { ok: true; advisories?: readonly ReasonCode[] }
   | { ok: false; reasonCode: ReasonCode; line?: number };
 
 export type ValidationLimits = {
@@ -127,6 +134,16 @@ function validateIntermediateExtras(
       ok: false,
       reasonCode: ReasonCodes.IntermediateDeltaDrift,
       line: INTERMEDIATE_DELTA_BULLET_INDEX,
+    };
+  }
+  const elapsedLine = lines[INTERMEDIATE_ELAPSED_LINE_INDEX];
+  if (
+    elapsedLine !== undefined &&
+    INTERMEDIATE_LEGACY_ACTIVITY_LABEL.test(elapsedLine)
+  ) {
+    return {
+      ok: true,
+      advisories: [ReasonCodes.IntermediateLegacyActivityLabel],
     };
   }
   return { ok: true };
