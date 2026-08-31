@@ -82,10 +82,12 @@ export const INTERMEDIATE_LAYOUT: readonly LineSpec[] = [
     code: ReasonCodes.MetadataLineDrift,
   },
   {
-    // Rejects the early legacy elapsed-only line such as `⏱ **ACP 시간**: 12분`.
+    // Rejects the early legacy elapsed-only line such as `⏱ **ACP 시간**: 12분`
+    // and the legacy `마지막 변화` activity label. The activity-age segment is
+    // shape-only: it carries no relation to the `새 결과` delta bullet.
     kind: "pattern",
     source:
-      "^⏱ \\*\\*ACP 시간\\*\\*: 전체 [0-9]+분 · 현재 단계 [0-9]+분 · 마지막 변화 [0-9]+분 전$",
+      "^⏱ \\*\\*ACP 시간\\*\\*: 전체 [0-9]+분 · 현재 단계 [0-9]+분 · 마지막 ACP 활동 [0-9]+분 전$",
     code: ReasonCodes.IntermediateElapsedDrift,
   },
   {

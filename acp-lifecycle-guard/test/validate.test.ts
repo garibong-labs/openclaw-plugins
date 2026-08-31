@@ -82,6 +82,18 @@ describe("valid canonical layouts", () => {
     );
   });
 
+  it("accepts Δ0 alongside a recent last-activity age (no semantic coupling)", () => {
+    // The activity-age segment is shape-only: a just-now activity age must not
+    // be forced to imply a Δ+N delta bullet, and vice versa.
+    expectValid(
+      replaceLine(
+        CANONICAL_INTERMEDIATE,
+        5,
+        "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분 · 마지막 ACP 활동 0분 전",
+      ),
+    );
+  });
+
   it("accepts the canonical start report", () => {
     expectValid(CANONICAL_START);
   });
@@ -213,12 +225,23 @@ describe("intermediate drift", () => {
     );
   });
 
-  it("rejects an elapsed line missing the last-change segment", () => {
+  it("rejects an elapsed line missing the last-activity segment", () => {
     expectRejected(
       replaceLine(
         CANONICAL_INTERMEDIATE,
         5,
         "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분",
+      ),
+      ReasonCodes.IntermediateElapsedDrift,
+    );
+  });
+
+  it("rejects the legacy `마지막 변화` activity label", () => {
+    expectRejected(
+      replaceLine(
+        CANONICAL_INTERMEDIATE,
+        5,
+        "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분 · 마지막 변화 2분 전",
       ),
       ReasonCodes.IntermediateElapsedDrift,
     );

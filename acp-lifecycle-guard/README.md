@@ -46,8 +46,11 @@ The guard rejects:
 - title drift, including an invalid clock value;
 - metadata drift, reordering, or a model/repository/branch value that is not
   inline code;
-- the early legacy elapsed-only line (`⏱ **ACP 시간**: 20분`) instead of the
-  current total / current-stage / last-change form;
+- the early legacy elapsed-only line (`⏱ **ACP 시간**: 20분`) and the legacy
+  `마지막 변화` activity label instead of the current total / current-stage /
+  last-ACP-activity (`마지막 ACP 활동 <N>분 전`) form; the activity-age
+  segment is validated as shape only, independent of the `새 결과` delta
+  bullet;
 - completion durations outside the canonical `<n>분` and `<n>분 <s>초` forms -
   both are valid, but seconds are bounded to `0`-`59`, so `17분 60초`,
   `17분 31`, and `17분31초` are drift;

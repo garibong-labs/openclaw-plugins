@@ -4,6 +4,21 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-08-31
+
+### Fixed
+
+- The canonical intermediate elapsed line now matches the live
+  `acp-progress-reporting` contract's activity label: only
+  `⏱ **ACP 시간**: 전체 <N>분 · 현재 단계 <N>분 · 마지막 ACP 활동 <N>분 전`
+  is accepted, and the legacy `마지막 변화` label is rejected with the
+  existing `acp_lifecycle_guard.intermediate.elapsed_drift` reason. The
+  previous release had the two labels inverted, so every live canonical
+  intermediate report was cancelled as elapsed drift. The activity-age
+  segment remains structurally independent of the `새 결과` delta bullet:
+  `Δ0` alongside a recent activity age stays valid, and no semantic coupling
+  between the two fields is inferred. Shape validation only; no scope change.
+
 ## [0.4.2] - 2026-08-31
 
 ### Fixed

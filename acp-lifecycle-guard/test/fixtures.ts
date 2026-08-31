@@ -12,7 +12,7 @@ export const CANONICAL_INTERMEDIATE = [
   "🤖 **ACP**: example-harness · `example-model-1`",
   "📍 **작업**: `example-repo` · `feat/example`",
   "🔢 **라운드**: 1 · 2/4 구현",
-  "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분 · 마지막 변화 2분 전",
+  "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분 · 마지막 ACP 활동 2분 전",
   "🔁 **실행 상태**: ACP 프롬프트 실행 중",
   "",
   "✅ **새 결과**",
