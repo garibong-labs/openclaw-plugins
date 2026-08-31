@@ -3,7 +3,11 @@
  *
  * Classification is anchored on the first visible line only: a payload is an
  * ACP lifecycle candidate when that line begins with the lifecycle marker emoji
- * **and** carries the lifecycle phrase for one supported family.
+ * **and** carries the lifecycle phrase for one supported family. Completion
+ * headlines also have a deliberately narrow near-canonical fallback: a finish
+ * marker followed by a line containing the standalone `ACP` token and `완료`.
+ * This keeps title drift inside strict completion validation instead of letting
+ * a renamed completion escape classification.
  *
  * This boundary is deliberate and documented:
  *
@@ -30,6 +34,8 @@ const CLASSIFIER_RULES: readonly ClassifierRule[] = [
   { kind: "completion", marker: "🏁", phrase: "ACP 완료 보고" },
 ];
 
+const ACP_TOKEN_PATTERN = /(?:^|[^A-Za-z0-9_])ACP(?:$|[^A-Za-z0-9_])/u;
+
 export type Classification =
   | { candidate: false }
   | { candidate: true; kind: LifecycleKind; normalized: string };
@@ -45,6 +51,13 @@ export function classifyLifecycleContent(content: string): Classification {
     if (probe.startsWith(rule.marker) && probe.includes(rule.phrase)) {
       return { candidate: true, kind: rule.kind, normalized };
     }
+  }
+  if (
+    probe.startsWith("🏁") &&
+    ACP_TOKEN_PATTERN.test(probe) &&
+    probe.includes("완료")
+  ) {
+    return { candidate: true, kind: "completion", normalized };
   }
   return { candidate: false };
 }

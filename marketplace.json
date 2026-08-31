@@ -1,10 +1,10 @@
 {
   "name": "garibong-labs",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "plugins": [
     {
       "name": "openclaw-acp-lifecycle-guard",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "description": "Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and tracks owner-checkpoint delivery receipts.",
       "source": "./acp-lifecycle-guard"
     }

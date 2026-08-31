@@ -9,6 +9,7 @@ import {
   CANONICAL_INTERMEDIATE,
   CANONICAL_START,
   ORDINARY_CHAT,
+  RENAMED_COMPLETION_TITLE,
 } from "./fixtures.ts";
 
 describe("classifyLifecycleContent", () => {
@@ -34,6 +35,12 @@ describe("classifyLifecycleContent", () => {
     const result = classifyLifecycleContent(drifted);
     assert.equal(result.candidate, true);
     assert.equal(result.candidate && result.kind, "intermediate");
+  });
+
+  it("classifies a near-canonical completion title for strict validation", () => {
+    const result = classifyLifecycleContent(RENAMED_COMPLETION_TITLE);
+    assert.equal(result.candidate, true);
+    assert.equal(result.candidate && result.kind, "completion");
   });
 
   it("does not classify ordinary ACP discussion", () => {
@@ -66,6 +73,25 @@ describe("classifyLifecycleContent", () => {
       "\n",
     );
     assert.equal(classifyLifecycleContent(fenced).candidate, false);
+  });
+
+  it("does not classify a quoted or fenced near-canonical completion title", () => {
+    const headline = "🏁 **ACP Codex 라운드 7 완료**";
+    const quoted = ["예시 제목을 검토합니다.", "", headline].join("\n");
+    const fenced = ["```markdown", headline, "```"].join("\n");
+    assert.equal(classifyLifecycleContent(quoted).candidate, false);
+    assert.equal(classifyLifecycleContent(fenced).candidate, false);
+  });
+
+  it("does not classify unrelated finish-marker chat", () => {
+    const unrelated = [
+      "🏁 예시 작업을 완료했습니다.",
+      "🏁 ACP 상태를 논의합니다.",
+      "🏁 **ACPX 완료 보고**",
+    ];
+    for (const message of unrelated) {
+      assert.equal(classifyLifecycleContent(message).candidate, false);
+    }
   });
 
   it("classifies a leading-indented title so indentation drift is caught", () => {

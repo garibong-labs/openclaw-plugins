@@ -21,6 +21,8 @@ import {
   CANONICAL_INTERMEDIATE,
   CANONICAL_INTERMEDIATE_WITH_ISSUE,
   CANONICAL_START,
+  ORCHESTRATOR_TERMINAL_COMPLETION,
+  RENAMED_COMPLETION_TITLE,
   completionWithDuration,
   insertLine,
   removeLine,
@@ -87,6 +89,11 @@ describe("valid canonical layouts", () => {
 
   it("accepts the canonical completion report", () => {
     expectValid(CANONICAL_COMPLETION);
+  });
+
+  it("accepts the orchestrator terminal builder's exact 20-line contract", () => {
+    assert.equal(ORCHESTRATOR_TERMINAL_COMPLETION.split("\n").length, 20);
+    expectValid(ORCHESTRATOR_TERMINAL_COMPLETION);
   });
 
   it("accepts a completion report in the minute-plus-seconds form", () => {
@@ -337,6 +344,10 @@ describe("start drift", () => {
 });
 
 describe("completion drift", () => {
+  it("rejects a near-canonical renamed title with title drift", () => {
+    expectRejected(RENAMED_COMPLETION_TITLE, ReasonCodes.TitleDrift);
+  });
+
   it("rejects a drifted duration line", () => {
     expectRejected(
       replaceLine(CANONICAL_COMPLETION, 4, "⏱️ **ACP 소요**: 42분"),

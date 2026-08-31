@@ -21,6 +21,7 @@ import {
   CANONICAL_INTERMEDIATE,
   ORDINARY_CHAT,
   ORDINARY_COMMAND,
+  RENAMED_COMPLETION_TITLE,
   replaceLine,
 } from "./fixtures.ts";
 
@@ -318,6 +319,42 @@ describe("logging never carries raw outbound content", () => {
     assert.match(
       flattened,
       /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=intermediate reason=acp_lifecycle_guard\.[a-z._]+$/u,
+    );
+  });
+
+  it("cancels a renamed completion without exposing outbound content", () => {
+    const { api, logs } = createFakeApi();
+    const handler = createMessageSendingHandler(api, DEFAULT_GUARD_CONFIG);
+    const tainted = replaceLine(
+      RENAMED_COMPLETION_TITLE,
+      7,
+      `- ${SECRET_MARKER}`,
+    );
+    const result = handler(
+      { to: SECRET_MARKER, content: tainted },
+      MESSAGE_CONTEXT,
+    );
+
+    assert.deepEqual(result, {
+      cancel: true,
+      cancelReason: ReasonCodes.TitleDrift,
+      metadata: {
+        pluginId: PLUGIN_ID,
+        lifecycleKind: "completion",
+        reasonCode: ReasonCodes.TitleDrift,
+      },
+    });
+    assert.equal(logs.length, 1);
+    const emitted = [flatten(logs), JSON.stringify(result)].join("\n");
+    assert.equal(emitted.includes(SECRET_MARKER), false);
+    for (const line of tainted.split("\n")) {
+      if (line.trim().length > 0) {
+        assert.equal(emitted.includes(line), false);
+      }
+    }
+    assert.match(
+      flatten(logs),
+      /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=completion reason=acp_lifecycle_guard\.common\.title_drift$/u,
     );
   });
 

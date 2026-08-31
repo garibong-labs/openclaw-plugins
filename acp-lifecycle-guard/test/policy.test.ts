@@ -13,6 +13,8 @@ import {
   CANONICAL_INTERMEDIATE,
   CANONICAL_START,
   ORDINARY_CHAT,
+  ORCHESTRATOR_TERMINAL_COMPLETION,
+  RENAMED_COMPLETION_TITLE,
   completionWithDuration,
   replaceLine,
 } from "./fixtures.ts";
@@ -48,6 +50,28 @@ describe("evaluateOutboundContent", () => {
       const decision = evaluateOutboundContent(report, DEFAULT_GUARD_CONFIG);
       assert.equal(decision.action, "pass");
     }
+  });
+
+  it("passes the orchestrator terminal builder's exact 20-line completion", () => {
+    assert.equal(ORCHESTRATOR_TERMINAL_COMPLETION.split("\n").length, 20);
+    assert.deepEqual(
+      evaluateOutboundContent(
+        ORCHESTRATOR_TERMINAL_COMPLETION,
+        DEFAULT_GUARD_CONFIG,
+      ),
+      { action: "pass", kind: "completion" },
+    );
+  });
+
+  it("cancels a near-canonical completion with the title-drift reason", () => {
+    assert.deepEqual(
+      evaluateOutboundContent(RENAMED_COMPLETION_TITLE, DEFAULT_GUARD_CONFIG),
+      {
+        action: "cancel",
+        kind: "completion",
+        reasonCode: ReasonCodes.TitleDrift,
+      },
+    );
   });
 
   it("cancels a completion report whose seconds exceed 59", () => {

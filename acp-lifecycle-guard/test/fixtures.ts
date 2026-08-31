@@ -56,7 +56,12 @@ export const CANONICAL_CORRECTION_START = CANONICAL_START.replace(
   "🔁 **ACP 수정 라운드 2 시작 · 15:00 KST**",
 );
 
-export const CANONICAL_COMPLETION = [
+/**
+ * Exact synthetic 20-line terminal shape emitted by the approved
+ * acp-discord-orchestrator completion builder. This fixture is copied as a
+ * public contract example; the guard does not depend on the skills repository.
+ */
+export const ORCHESTRATOR_TERMINAL_COMPLETION = [
   "🏁 **ACP 완료 보고 · 15:40 KST**",
   "",
   "🤖 **ACP**: example-harness · `example-model-1`",
@@ -78,6 +83,15 @@ export const CANONICAL_COMPLETION = [
   "🔒 **외부 작업**",
   "- 없음",
 ].join("\n");
+
+export const CANONICAL_COMPLETION = ORCHESTRATOR_TERMINAL_COMPLETION;
+
+/** Synthetic near-canonical completion whose renamed title must not bypass. */
+export const RENAMED_COMPLETION_TITLE = replaceLine(
+  CANONICAL_COMPLETION,
+  0,
+  "🏁 **ACP Codex 라운드 7 완료**",
+);
 
 export const ORDINARY_CHAT =
   "ACP 중간 보고 주기는 10분입니다. 지금은 시작 보고만 보냈습니다.";

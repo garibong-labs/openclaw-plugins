@@ -4,6 +4,21 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-08-31
+
+### Fixed
+
+- Near-canonical completion headlines whose first visible line starts with
+  `🏁`, contains the standalone `ACP` token, and expresses `완료` intent now
+  enter strict completion validation. A renamed title can no longer bypass the
+  `message_sending` guard; it is cancelled with the existing content-free
+  title-drift reason. Ordinary discussion, later quoted titles, fenced
+  templates, unrelated finish-marker chat, and start/intermediate
+  classification remain unchanged.
+- Added a synthetic cross-contract fixture proving that the exact 20-line
+  completion shape emitted by the approved `acp-discord-orchestrator` terminal
+  builder passes without adding a dependency on the skills repository.
+
 ## [0.4.1] - 2026-08-30
 
 ### Fixed
