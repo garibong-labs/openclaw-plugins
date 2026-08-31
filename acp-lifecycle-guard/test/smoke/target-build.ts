@@ -16,15 +16,22 @@
  *     authoritative guard - the regression this smoke exists for.
  *  3. A malformed lifecycle report is cancelled with the expected reason code.
  *  4. Ordinary chat is returned untouched.
- *  5. A recognized ACP launch from a non-`main` agent is blocked with the
+ *  5. A valid intermediate report still carrying the transition-window legacy
+ *     `마지막 변화` activity label passes the authoritative guard untouched
+ *     (the runner returns the pass/no-op shape), while exactly one
+ *     content-free `intermediate.legacy_activity_label` advisory is logged at
+ *     info level. The fixture carries a synthetic secret marker so the
+ *     passing path is proven never to echo report content, the destination,
+ *     or the payload into a log, reason, or metadata value.
+ *  6. A recognized ACP launch from a non-`main` agent is blocked with the
  *     stable reason code, while the same launch from `main` and an ordinary
  *     command pass.
- *  6. The receipt guard ships observing: with no configuration at all, an
+ *  7. The receipt guard ships observing: with no configuration at all, an
  *     eligible checkpoint that reaches finalize without a receipt is logged
  *     (`receipt.missing`) and the finalize proceeds untouched - no revise.
  *
  * Phase B - `ownerCheckpointReceiptMode: "enforce"`:
- *  7. The installed runner dispatches all four receipt hooks: an eligible cron
+ *  8. The installed runner dispatches all four receipt hooks: an eligible cron
  *     checkpoint correlates, an exact-target send receipt is accepted (a
  *     failed send and a wrong-target success are not), a missing receipt
  *     yields the bounded enforce-mode revise result on every round (the guard
@@ -37,12 +44,12 @@
  *     (`receipt.end_unproven`) with the checkpoint still guarded and the
  *     next registration displacing the candidate as an observable eviction,
  *     and ordinary turns bypass everything.
- *  8. Eligibility is proven behaviorally on both installed cron context
+ *  9. Eligibility is proven behaviorally on both installed cron context
  *     shapes: without `jobId` (the embedded cron runner omits it from the
  *     `before_agent_run` context it assembles - verified by hand on the
  *     pinned build) and with `jobId` (the CLI-runner shape), where the field
  *     is inert. This replaces the earlier bundling-sensitive source probe.
- *  9. A `message_sent` driven through the installed host mappers
+ * 10. A `message_sent` driven through the installed host mappers
  *     (`buildCanonicalSentMessageHookContext` -> `toPluginMessageSentEvent` /
  *     `toPluginMessageContext`, imported from the stable
  *     `openclaw/plugin-sdk/hook-runtime` subpath) confirms a receipt. The
@@ -51,26 +58,26 @@
  *     session-bound, and a `conversationId` that falls back to the raw `to` -
  *     including a wrapper-prefixed `to`, which the guard's bounded
  *     normalization must still match.
- * 10. A cron prompt carrying a near-miss of the checkpoint marker produces
+ * 11. A cron prompt carrying a near-miss of the checkpoint marker produces
  *     the content-free `receipt.marker_drift` signal and no tracking.
  *
  * Phase C - composition against synthetic second plugins:
- * 11. `before_agent_run` gate composition: a higher-priority block short-
+ * 12. `before_agent_run` gate composition: a higher-priority block short-
  *     circuits before this guard runs, and a lower-priority block still wins
  *     over this guard's explicit pass - an earlier or later block is never
  *     un-stuck by the guard passing.
- * 12. Finalize merge and budget contract: a synthetic plugin's `finalize`
+ * 13. Finalize merge and budget contract: a synthetic plugin's `finalize`
  *     decision wins the installed merge over this guard's revise for two
  *     rounds without consuming any budget; once the guard's revise can win,
  *     the installed harness accounting applies and charges exactly the
  *     bounded per-(runId, idempotencyKey) rounds and then continues - two
  *     overridden requests never prevent the guard from later revising, and
  *     the run always eventually finalizes.
- * 13. The installed gate's nullish normalization is pinned with synthetic
+ * 14. The installed gate's nullish normalization is pinned with synthetic
  *     probes: a `null` handler result is blocked outright and `undefined`
  *     survives only an incidental merge-layer guard, so this guard's
  *     explicit `{ outcome: "pass" }` is asserted for every scenario.
- * 14. No raw outbound content, prompt text, command text, agent id, or
+ * 15. No raw outbound content, prompt text, command text, agent id, or
  *     correlation identifier reaches a log line, the cancel reason, the block
  *     reason, a revise reason, or the hook metadata.
  *
@@ -110,9 +117,11 @@ import {
   CANONICAL_COMPLETION_WITH_SECONDS,
   CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT,
   CHECKPOINT_REPORT_TERMINAL_GREEN,
+  LEGACY_ACTIVITY_INTERMEDIATE,
   ORDINARY_CHAT,
   OWNER_CHECKPOINT_PROMPT,
   completionWithDuration,
+  replaceLine,
 } from "../fixtures.ts";
 
 const PLUGIN_ID = "acp-lifecycle-guard";
@@ -191,6 +200,24 @@ const PLUGIN_ROOT = path.resolve(
 /** A completion report whose seconds overflow the 0-59 bound. */
 const MALFORMED_COMPLETION = completionWithDuration("17분 60초");
 
+/** The synthetic `to` / `channelId` every message_sending dispatch uses. */
+const SMOKE_SEND_TARGET = "smoke-target";
+const SMOKE_SEND_CHANNEL = "smoke-channel";
+
+/**
+ * Synthetic secret marker spliced into a free-form bullet of the
+ * legacy-activity-label report: if the passing advisory path ever echoes
+ * report content, the marker surfaces in the privacy sweep.
+ */
+const SMOKE_SECRET_MARKER = "smoke-secret-marker-a1b2c3";
+const LEGACY_INTERMEDIATE_WITH_SECRET = replaceLine(
+  LEGACY_ACTIVITY_INTERMEDIATE,
+  LEGACY_ACTIVITY_INTERMEDIATE.split("\n").findIndex((line) =>
+    line.includes("ACP 진행 중"),
+  ) + 1,
+  `- 예시 진행 항목 ${SMOKE_SECRET_MARKER}`,
+);
+
 const checks: string[] = [];
 
 function record(message: string): void {
@@ -257,6 +284,7 @@ function contentNeedles(): readonly string[] {
   const lines = [
     CANONICAL_COMPLETION_WITH_SECONDS,
     MALFORMED_COMPLETION,
+    LEGACY_INTERMEDIATE_WITH_SECRET,
     ORDINARY_CHAT,
     OWNER_CHECKPOINT_PROMPT,
     CHECKPOINT_PROMPT_MARKER_VERSION_DRIFT,
@@ -264,6 +292,9 @@ function contentNeedles(): readonly string[] {
   ].flatMap((report) => report.split("\n"));
   lines.push(
     UNAUTHORIZED_AGENT_ID,
+    SMOKE_SECRET_MARKER,
+    SMOKE_SEND_TARGET,
+    SMOKE_SEND_CHANNEL,
     SMOKE_CHANNEL,
     SMOKE_CONVERSATION,
     SMOKE_WRONG_CONVERSATION,
@@ -459,9 +490,9 @@ async function main(): Promise<void> {
       "built entry registers message and receipt hooks only; the installed runner + harness + mapper contracts are present",
     );
 
-    const ctx = { channelId: "smoke-channel" };
+    const ctx = { channelId: SMOKE_SEND_CHANNEL };
     const send = (content: string): Promise<unknown> =>
-      runner.runMessageSending({ to: "smoke-target", content }, ctx);
+      runner.runMessageSending({ to: SMOKE_SEND_TARGET, content }, ctx);
     const validCompletion = await send(CANONICAL_COMPLETION_WITH_SECONDS);
     const malformed = (await send(MALFORMED_COMPLETION)) as {
       cancel?: boolean;
@@ -494,6 +525,45 @@ async function main(): Promise<void> {
 
     assert.equal(chat, undefined, "ordinary chat must pass untouched");
     record("ordinary chat passes untouched");
+
+    // Transition-window legacy activity label: a valid intermediate report
+    // still carrying `마지막 변화` must pass the installed runner untouched
+    // while exactly one content-free advisory is logged at info level. The
+    // fixture's embedded secret marker is swept below along with every
+    // report line and the send destination.
+    const legacyResult = await send(LEGACY_INTERMEDIATE_WITH_SECRET);
+    assert.equal(
+      legacyResult,
+      undefined,
+      "a valid intermediate report using the legacy activity label must not be cancelled",
+    );
+    const legacyAdvisoryLogs = defaultRegistration.logs.filter((entry) =>
+      entry.args.some(
+        (arg) =>
+          typeof arg === "string" &&
+          arg.includes(ReasonCodes.IntermediateLegacyActivityLabel),
+      ),
+    );
+    assert.equal(
+      legacyAdvisoryLogs.length,
+      1,
+      "the legacy activity label must be surfaced with exactly one advisory log line",
+    );
+    assert.equal(
+      legacyAdvisoryLogs[0]?.level,
+      "info",
+      "the legacy-label advisory must be logged at info level, never as a warning",
+    );
+    assert.deepEqual(
+      legacyAdvisoryLogs[0]?.args,
+      [
+        `[${PLUGIN_ID}] hook=${HOOK_NAME} outcome=passed kind=intermediate reason=${ReasonCodes.IntermediateLegacyActivityLabel}`,
+      ],
+      "the advisory log line must carry exactly the bounded content-free fields",
+    );
+    record(
+      `valid intermediate with the legacy activity label passes the authoritative guard untouched; exactly one info advisory (${ReasonCodes.IntermediateLegacyActivityLabel}) with the bounded fields`,
+    );
 
     record("before_tool_call remains absent, so native Codex approval policy is not globally promoted");
 
@@ -1250,6 +1320,11 @@ async function main(): Promise<void> {
         `raw outbound content leaked into a log, reason, or metadata: ${JSON.stringify(needle.slice(0, 24))}`,
       );
     }
+    assert.equal(
+      countLogs(allLogs, ReasonCodes.IntermediateLegacyActivityLabel),
+      1,
+      "the legacy-label advisory must be emitted exactly once across the whole smoke",
+    );
     assert.ok(allLogs.length > 0, "the guard logs its decisions");
     record(
       `no raw outbound content in ${allLogs.length} log record(s), stdout, stderr, cancel reason, or metadata`,
