@@ -27,6 +27,18 @@ lifecycle report, it is validated against the canonical layout for its family.
 A malformed report is cancelled with `{ cancel: true, cancelReason }` before
 delivery. Anything else passes through untouched.
 
+Classification remains anchored to the first visible line. That line must start
+with a supported family marker and contain the standalone `ACP` token. An exact
+canonical family phrase is sufficient; a renamed title must also express that
+family's lifecycle intent and have at least two recognizable family body lines
+later in the payload. This narrow structural fallback covers intermediate,
+start, correction-start, and completion renames (including completion titles
+using `종료` or `마무리`) without treating marker chat or terminal
+failure/cancellation/blocker/tracking-loss reports as lifecycle candidates.
+Candidates enter strict validation and receive an existing content-free drift
+reason; depending on earlier structural drift, that reason is not necessarily
+`title_drift`.
+
 Validation is positional, because line order, blank separators, metadata order,
 section names, and the one-bullet-per-section rule are all part of the contract.
 The guard rejects:
@@ -225,9 +237,11 @@ messages, so the scope is narrow on purpose:
   through.
 - **Payloads that do not begin with a lifecycle marker line.** Classification is
   anchored on the first visible line beginning with the family's marker emoji
-  and phrase. A quoted, fenced, prefixed, or paraphrased report is treated as
-  ordinary content. The guard fails open on classification and fails closed on
-  validation; it is a malformed-delivery safeguard, not a completeness oracle.
+  and phrase, plus the narrow structurally shaped title fallback described
+  above. A quoted, fenced, or prefixed report is treated as ordinary content,
+  as is a paraphrase outside that fallback. The guard fails open on
+  classification and fails closed on validation; it is a malformed-delivery
+  safeguard, not a completeness oracle.
 - **Truth of the values.** The guard checks shape, not whether the elapsed
   minutes, round index, or counters are accurate.
 - **Semantic rules it cannot verify locally**, such as absolute-path or

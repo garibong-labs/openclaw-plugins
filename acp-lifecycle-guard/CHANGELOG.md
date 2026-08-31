@@ -4,6 +4,23 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-08-31
+
+### Fixed
+
+- Near-canonical titles across all four lifecycle families now enter strict
+  validation when the first visible line has the family's marker, standalone
+  `ACP`, family intent, and at least two recognizable body anchors. Completion
+  intent includes narrow `완료`, `종료`, and `마무리` forms while excluding
+  non-completion, pending, failure, cancellation, blocker, and tracking-loss
+  titles. Ordinary marker chat remains untouched. Rejected candidates use an
+  existing content-free drift reason, which depends on the earliest structural
+  mismatch and is not always title drift.
+- Added an independently owned synthetic contract fixture proving that the
+  external terminal builder's exact 20-line completion shape passes without a
+  dependency on another repository.
+- Normalized report text to NFC so decomposed Hangul cannot bypass any family.
+
 ## [0.4.1] - 2026-08-30
 
 ### Fixed

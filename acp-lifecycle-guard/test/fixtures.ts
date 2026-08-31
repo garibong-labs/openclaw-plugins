@@ -56,6 +56,34 @@ export const CANONICAL_CORRECTION_START = CANONICAL_START.replace(
   "🔁 **ACP 수정 라운드 2 시작 · 15:00 KST**",
 );
 
+/**
+ * Exact synthetic 20-line terminal shape emitted by the approved
+ * acp-discord-orchestrator completion builder. This fixture is copied as a
+ * public contract example; the guard does not depend on the skills repository.
+ */
+export const ORCHESTRATOR_TERMINAL_COMPLETION = [
+  "🏁 **ACP 완료 보고 · 15:40 KST**",
+  "",
+  "🤖 **ACP**: example-harness · `example-model-1`",
+  "📍 **작업**: `example-repo` · `feat/example`",
+  "⏱️ **ACP 소요**: 42분 · 라운드 1",
+  "",
+  "✅ **ACP 완료**",
+  "- 예시 구현 완료",
+  "",
+  "🧪 **ACP 자체 검증**",
+  "- 테스트 24/24 통과",
+  "",
+  "📦 **결과**",
+  "- 커밋 1개 · 변경 파일 9개",
+  "",
+  "🔍 **다음**",
+  "- Eli 독립 검증 시작",
+  "",
+  "🔒 **외부 작업**",
+  "- 없음",
+].join("\n");
+
 export const CANONICAL_COMPLETION = [
   "🏁 **ACP 완료 보고 · 15:40 KST**",
   "",
@@ -78,6 +106,31 @@ export const CANONICAL_COMPLETION = [
   "🔒 **외부 작업**",
   "- 없음",
 ].join("\n");
+
+export const RENAMED_INTERMEDIATE_TITLE = replaceLine(
+  CANONICAL_INTERMEDIATE,
+  0,
+  "🔄 **ACP 진행 현황 · 14:20 KST**",
+);
+
+export const RENAMED_START_TITLE = replaceLine(
+  CANONICAL_START,
+  0,
+  "🚀 **ACP 실행 착수 · 14:00 KST**",
+);
+
+export const RENAMED_CORRECTION_START_TITLE = replaceLine(
+  CANONICAL_CORRECTION_START,
+  0,
+  "🔁 **ACP 교정 작업 착수 · 15:00 KST**",
+);
+
+/** Synthetic near-canonical completion whose renamed title must not bypass. */
+export const RENAMED_COMPLETION_TITLE = replaceLine(
+  CANONICAL_COMPLETION,
+  0,
+  "🏁 **ACP example-harness 라운드 7 완료**",
+);
 
 export const ORDINARY_CHAT =
   "ACP 중간 보고 주기는 10분입니다. 지금은 시작 보고만 보냈습니다.";

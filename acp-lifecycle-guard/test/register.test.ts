@@ -21,6 +21,7 @@ import {
   CANONICAL_INTERMEDIATE,
   ORDINARY_CHAT,
   ORDINARY_COMMAND,
+  RENAMED_COMPLETION_TITLE,
   replaceLine,
 } from "./fixtures.ts";
 
@@ -136,6 +137,26 @@ describe("message_sending handler", () => {
         reasonCode: ReasonCodes.IntermediateElapsedDrift,
       },
     });
+  });
+
+  it("cancels a renamed completion through the message hook", () => {
+    const { api } = createFakeApi();
+    const handler = createMessageSendingHandler(api, DEFAULT_GUARD_CONFIG);
+    assert.deepEqual(
+      handler(
+        { to: "target", content: RENAMED_COMPLETION_TITLE },
+        MESSAGE_CONTEXT,
+      ),
+      {
+        cancel: true,
+        cancelReason: ReasonCodes.TitleDrift,
+        metadata: {
+          pluginId: PLUGIN_ID,
+          lifecycleKind: "completion",
+          reasonCode: ReasonCodes.TitleDrift,
+        },
+      },
+    );
   });
 
   it("does not cancel while enforcement is disabled", () => {
@@ -318,6 +339,42 @@ describe("logging never carries raw outbound content", () => {
     assert.match(
       flattened,
       /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=intermediate reason=acp_lifecycle_guard\.[a-z._]+$/u,
+    );
+  });
+
+  it("cancels a reachable tainted completion line without exposing content", () => {
+    const { api, logs } = createFakeApi();
+    const handler = createMessageSendingHandler(api, DEFAULT_GUARD_CONFIG);
+    const tainted = replaceLine(
+      CANONICAL_COMPLETION,
+      16,
+      `- ${SECRET_MARKER}`,
+    );
+    const result = handler(
+      { to: SECRET_MARKER, content: tainted },
+      MESSAGE_CONTEXT,
+    );
+
+    assert.deepEqual(result, {
+      cancel: true,
+      cancelReason: ReasonCodes.CompletionNextLineDrift,
+      metadata: {
+        pluginId: PLUGIN_ID,
+        lifecycleKind: "completion",
+        reasonCode: ReasonCodes.CompletionNextLineDrift,
+      },
+    });
+    assert.equal(logs.length, 1);
+    const emitted = [flatten(logs), JSON.stringify(result)].join("\n");
+    assert.equal(emitted.includes(SECRET_MARKER), false);
+    for (const line of tainted.split("\n")) {
+      if (line.trim().length > 0) {
+        assert.equal(emitted.includes(line), false);
+      }
+    }
+    assert.match(
+      flatten(logs),
+      /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=completion reason=acp_lifecycle_guard\.completion\.next_line_drift$/u,
     );
   });
 
