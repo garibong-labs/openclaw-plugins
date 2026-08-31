@@ -23,6 +23,9 @@ import {
   CANONICAL_START,
   ORCHESTRATOR_TERMINAL_COMPLETION,
   RENAMED_COMPLETION_TITLE,
+  RENAMED_CORRECTION_START_TITLE,
+  RENAMED_INTERMEDIATE_TITLE,
+  RENAMED_START_TITLE,
   completionWithDuration,
   insertLine,
   removeLine,
@@ -108,9 +111,24 @@ describe("valid canonical layouts", () => {
   it("accepts a report delivered with CRLF endings and a trailing newline", () => {
     expectValid(`${CANONICAL_INTERMEDIATE.replace(/\n/gu, "\r\n")}\r\n`);
   });
+
+  it("accepts canonically equivalent NFD-decomposed Hangul in every family", () => {
+    for (const report of [
+      CANONICAL_INTERMEDIATE,
+      CANONICAL_START,
+      CANONICAL_CORRECTION_START,
+      CANONICAL_COMPLETION,
+    ]) {
+      expectValid(report.normalize("NFD"));
+    }
+  });
 });
 
 describe("intermediate drift", () => {
+  it("rejects a renamed intermediate title with title drift", () => {
+    expectRejected(RENAMED_INTERMEDIATE_TITLE, ReasonCodes.TitleDrift);
+  });
+
   it("rejects title drift", () => {
     expectRejected(
       replaceLine(CANONICAL_INTERMEDIATE, 0, "🔄 **ACP 중간 보고**"),
@@ -303,6 +321,10 @@ describe("intermediate drift", () => {
 });
 
 describe("start drift", () => {
+  it("rejects renamed start-family titles with title drift", () => {
+    expectRejected(RENAMED_START_TITLE, ReasonCodes.TitleDrift);
+    expectRejected(RENAMED_CORRECTION_START_TITLE, ReasonCodes.TitleDrift);
+  });
   it("rejects an elapsed claim before dispatch activation", () => {
     expectRejected(
       replaceLine(CANONICAL_START, 6, "- 예시 구현 범위 · ACP 시간 5분"),

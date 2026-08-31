@@ -15,6 +15,9 @@ import {
   ORDINARY_CHAT,
   ORCHESTRATOR_TERMINAL_COMPLETION,
   RENAMED_COMPLETION_TITLE,
+  RENAMED_CORRECTION_START_TITLE,
+  RENAMED_INTERMEDIATE_TITLE,
+  RENAMED_START_TITLE,
   completionWithDuration,
   replaceLine,
 } from "./fixtures.ts";
@@ -63,15 +66,23 @@ describe("evaluateOutboundContent", () => {
     );
   });
 
-  it("cancels a near-canonical completion with the title-drift reason", () => {
-    assert.deepEqual(
-      evaluateOutboundContent(RENAMED_COMPLETION_TITLE, DEFAULT_GUARD_CONFIG),
-      {
-        action: "cancel",
-        kind: "completion",
-        reasonCode: ReasonCodes.TitleDrift,
-      },
-    );
+  it("cancels a near-canonical renamed title in every family", () => {
+    const cases = [
+      [RENAMED_INTERMEDIATE_TITLE, "intermediate"],
+      [RENAMED_START_TITLE, "start"],
+      [RENAMED_CORRECTION_START_TITLE, "correction-start"],
+      [RENAMED_COMPLETION_TITLE, "completion"],
+    ] as const;
+    for (const [report, kind] of cases) {
+      assert.deepEqual(
+        evaluateOutboundContent(report, DEFAULT_GUARD_CONFIG),
+        {
+          action: "cancel",
+          kind,
+          reasonCode: ReasonCodes.TitleDrift,
+        },
+      );
+    }
   });
 
   it("cancels a completion report whose seconds exceed 59", () => {
@@ -124,6 +135,26 @@ describe("evaluateOutboundContent", () => {
     assert.deepEqual(evaluateOutboundContent(failure, DEFAULT_GUARD_CONFIG), {
       action: "pass",
     });
+  });
+
+  it("passes lifecycle-shaped terminal failure and pending reports untouched", () => {
+    for (const title of [
+      "🏁 **ACP 작업 미완료 · 16:00 KST**",
+      "🏁 **ACP 작업을 완료하지 못했습니다**",
+      "🏁 **ACP 완료율 80% · 16:00 KST**",
+      "🏁 **ACP 완료 예정 · 16:00 KST**",
+      "🏁 **ACP 완료 보고 예정 · 16:00 KST**",
+      "🏁 **ACP 실행 실패 · 16:00 KST**",
+      "🏁 **ACP 실행 취소 · 16:00 KST**",
+      "🏁 **ACP 운영자 차단 · 16:00 KST**",
+      "🏁 **ACP 추적 손실 · 16:00 KST**",
+    ]) {
+      const report = replaceLine(CANONICAL_COMPLETION, 0, title);
+      assert.deepEqual(
+        evaluateOutboundContent(report, DEFAULT_GUARD_CONFIG),
+        { action: "pass" },
+      );
+    }
   });
 });
 

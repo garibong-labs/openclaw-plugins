@@ -8,16 +8,18 @@ plugin is versioned independently of the repository and follows
 
 ### Fixed
 
-- Near-canonical completion headlines whose first visible line starts with
-  `🏁`, contains the standalone `ACP` token, and expresses `완료` intent now
-  enter strict completion validation. A renamed title can no longer bypass the
-  `message_sending` guard; it is cancelled with the existing content-free
-  title-drift reason. Ordinary discussion, later quoted titles, fenced
-  templates, unrelated finish-marker chat, and start/intermediate
-  classification remain unchanged.
-- Added a synthetic cross-contract fixture proving that the exact 20-line
-  completion shape emitted by the approved `acp-discord-orchestrator` terminal
-  builder passes without adding a dependency on the skills repository.
+- Near-canonical titles across all four lifecycle families now enter strict
+  validation when the first visible line has the family's marker, standalone
+  `ACP`, family intent, and at least two recognizable body anchors. Completion
+  intent includes narrow `완료`, `종료`, and `마무리` forms while excluding
+  non-completion, pending, failure, cancellation, blocker, and tracking-loss
+  titles. Ordinary marker chat remains untouched. Rejected candidates use an
+  existing content-free drift reason, which depends on the earliest structural
+  mismatch and is not always title drift.
+- Added an independently owned synthetic contract fixture proving that the
+  external terminal builder's exact 20-line completion shape passes without a
+  dependency on another repository.
+- Normalized report text to NFC so decomposed Hangul cannot bypass any family.
 
 ## [0.4.1] - 2026-08-30
 

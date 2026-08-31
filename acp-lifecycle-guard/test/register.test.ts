@@ -139,6 +139,26 @@ describe("message_sending handler", () => {
     });
   });
 
+  it("cancels a renamed completion through the message hook", () => {
+    const { api } = createFakeApi();
+    const handler = createMessageSendingHandler(api, DEFAULT_GUARD_CONFIG);
+    assert.deepEqual(
+      handler(
+        { to: "target", content: RENAMED_COMPLETION_TITLE },
+        MESSAGE_CONTEXT,
+      ),
+      {
+        cancel: true,
+        cancelReason: ReasonCodes.TitleDrift,
+        metadata: {
+          pluginId: PLUGIN_ID,
+          lifecycleKind: "completion",
+          reasonCode: ReasonCodes.TitleDrift,
+        },
+      },
+    );
+  });
+
   it("does not cancel while enforcement is disabled", () => {
     const { api, logs } = createFakeApi({ enforce: false });
     const handler = createMessageSendingHandler(api);
@@ -322,12 +342,12 @@ describe("logging never carries raw outbound content", () => {
     );
   });
 
-  it("cancels a renamed completion without exposing outbound content", () => {
+  it("cancels a reachable tainted completion line without exposing content", () => {
     const { api, logs } = createFakeApi();
     const handler = createMessageSendingHandler(api, DEFAULT_GUARD_CONFIG);
     const tainted = replaceLine(
-      RENAMED_COMPLETION_TITLE,
-      7,
+      CANONICAL_COMPLETION,
+      16,
       `- ${SECRET_MARKER}`,
     );
     const result = handler(
@@ -337,11 +357,11 @@ describe("logging never carries raw outbound content", () => {
 
     assert.deepEqual(result, {
       cancel: true,
-      cancelReason: ReasonCodes.TitleDrift,
+      cancelReason: ReasonCodes.CompletionNextLineDrift,
       metadata: {
         pluginId: PLUGIN_ID,
         lifecycleKind: "completion",
-        reasonCode: ReasonCodes.TitleDrift,
+        reasonCode: ReasonCodes.CompletionNextLineDrift,
       },
     });
     assert.equal(logs.length, 1);
@@ -354,7 +374,7 @@ describe("logging never carries raw outbound content", () => {
     }
     assert.match(
       flatten(logs),
-      /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=completion reason=acp_lifecycle_guard\.common\.title_drift$/u,
+      /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=completion reason=acp_lifecycle_guard\.completion\.next_line_drift$/u,
     );
   });
 

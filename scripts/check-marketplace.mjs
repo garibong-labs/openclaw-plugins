@@ -33,6 +33,21 @@ function readJson(filePath) {
 
 const manifestPath = path.join(repoRoot, "marketplace.json");
 const manifest = readJson(manifestPath);
+const catalogText = readFileSync(path.join(repoRoot, "README.md"), "utf8");
+const catalogRows = catalogText
+  .split("\n")
+  .filter((line) => line.startsWith("|"))
+  .map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()))
+  .filter(
+    (cells) =>
+      cells.length >= 4 &&
+      cells[0] !== "Plugin" &&
+      !cells.every((cell) => /^-+$/u.test(cell)),
+  );
+
+function unquoteCatalogCell(value) {
+  return value?.replace(/^`(.*)`$/u, "$1");
+}
 
 if (typeof manifest.name !== "string" || manifest.name.length === 0) {
   fail("marketplace.json: missing name");
@@ -86,6 +101,9 @@ for (const entry of manifest.plugins ?? []) {
 
   const pluginManifest = readJson(pluginManifestPath);
   const packageJson = readJson(packageJsonPath);
+  const catalogMatches = catalogRows.filter(
+    (cells) => unquoteCatalogCell(cells[0]) === packageJson.name,
+  );
 
   if (typeof pluginManifest.id !== "string" || pluginManifest.id.length === 0) {
     fail(`${label}: openclaw.plugin.json is missing id`);
@@ -113,6 +131,27 @@ for (const entry of manifest.plugins ?? []) {
     fail(
       `${label}: openclaw.plugin.json version ${pluginManifest.version} does not match package.json ${packageJson.version}`,
     );
+  }
+  if (catalogMatches.length !== 1) {
+    fail(`${label}: root README catalog must contain exactly one plugin row`);
+  } else {
+    const [catalogName, catalogDirectory, catalogId, catalogVersion] =
+      catalogMatches[0];
+    const expectedDirectory = `${path.basename(resolved)}/`;
+    if (unquoteCatalogCell(catalogName) !== packageJson.name) {
+      fail(`${label}: root README catalog package name does not match`);
+    }
+    if (unquoteCatalogCell(catalogDirectory) !== expectedDirectory) {
+      fail(`${label}: root README catalog directory does not match ${source}`);
+    }
+    if (unquoteCatalogCell(catalogId) !== pluginManifest.id) {
+      fail(`${label}: root README catalog plugin id does not match manifest`);
+    }
+    if (unquoteCatalogCell(catalogVersion) !== packageJson.version) {
+      fail(
+        `${label}: root README catalog version ${unquoteCatalogCell(catalogVersion)} does not match package.json ${packageJson.version}`,
+      );
+    }
   }
 
   const extensions = packageJson.openclaw?.extensions;

@@ -5,6 +5,8 @@
  * that carries no lifecycle meaning:
  *
  * - CRLF / CR line endings become LF.
+ * - Unicode text is normalized to NFC so canonically equivalent Hangul has
+ *   one representation.
  * - Trailing newlines at the very end of the payload are dropped, because
  *   channel transports routinely add one.
  * - Emoji variation selectors (U+FE0F) are stripped so a renderer that omits
@@ -22,7 +24,7 @@ export function stripVariationSelectors(value: string): string {
 
 export function normalizeReportText(content: string): string {
   return stripVariationSelectors(
-    content.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n"),
+    content.normalize("NFC").replace(/\r\n/gu, "\n").replace(/\r/gu, "\n"),
   ).replace(/\n+$/u, "");
 }
 

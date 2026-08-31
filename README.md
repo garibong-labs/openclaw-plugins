@@ -9,7 +9,7 @@ root doubles as an OpenClaw remote marketplace.
 
 | Plugin                         | Directory              | Plugin id             | Version | What it does                                                                                                                       |
 | ------------------------------ | ---------------------- | --------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `openclaw-acp-lifecycle-guard` | `acp-lifecycle-guard/` | `acp-lifecycle-guard` | 0.4.1   | Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and tracks owner-checkpoint delivery receipts. |
+| `openclaw-acp-lifecycle-guard` | `acp-lifecycle-guard/` | `acp-lifecycle-guard` | 0.4.2   | Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and tracks owner-checkpoint delivery receipts. |
 
 ## Install from the marketplace
 
@@ -81,8 +81,8 @@ Each plugin is versioned independently, starting at `0.1.0`, and follows
 semantic versioning:
 
 - the plugin's `package.json` version is authoritative;
-- `openclaw.plugin.json#version` and the `marketplace.json` entry version must
-  match it (CI enforces this);
+- `openclaw.plugin.json#version`, the `marketplace.json` entry version, and the
+  root plugin catalog version must match it (CI enforces this);
 - every plugin keeps its own `CHANGELOG.md`;
 - the repository itself is not versioned as a unit, and `marketplace.json`
   carries its own manifest version for catalog consumers.
