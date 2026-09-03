@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Target-build smoke: `message_sending` cancellation and the owner-checkpoint
- * receipt hooks. `before_tool_call` must remain unregistered: on the pinned
- * host it globally promotes native Codex approvals for every session.
+ * Target-build smoke: `message_sending` cancellation, owner-checkpoint receipt
+ * hooks, and registration of the durable controller tool plus its bounded
+ * trusted-tool policy. A global `before_tool_call` hook remains unregistered.
  *
  * The unit suites exercise the pure policy functions. This smoke exercises the
  * *built* plugin through the *installed* OpenClaw hook runner instead, so it
@@ -10,8 +10,9 @@
  * long-established guarantees always run first:
  *
  * Phase A - shipped default configuration (`pluginConfig` absent):
- *  1. `dist/index.js` loads against the real `openclaw/plugin-sdk/plugin-entry`
- *     and its `register` puts all six handlers into the registry.
+ *  1. `dist/index.js` loads against the real `openclaw/plugin-sdk/plugin-entry`,
+ *     registers all controller and migration handlers, and exposes exactly one
+ *     controller tool plus one scoped trusted-tool policy.
  *  2. A canonical completion report carrying seconds (`17분 31초`) survives the
  *     authoritative guard - the regression this smoke exists for.
  *  3. A malformed lifecycle report is cancelled with the expected reason code.
@@ -161,7 +162,7 @@ const SMOKE_SCENARIOS = [
  * One trusted cron agent-hook context per receipt scenario.
  *
  * The base shape carries no `jobId`, mirroring the installed embedded cron
- * path (`openclaw@2026.7.1-2`), where the cron executor passes
+ * path (`openclaw@2026.8.1`), where the cron executor passes
  * `jobId: params.job.id` into `runEmbeddedAgent` but the `hookCtx` the
  * embedded runner assembles for `before_agent_run` omits it (verified by
  * hand on the pinned build). The `jobid` scenario adds the field to mirror
@@ -343,7 +344,7 @@ async function main(): Promise<void> {
   // prove what the host does with revise decisions and exhausted budgets.
   const agentHarness = await import(
     pathToFileURL(
-      requireFromWorkspace.resolve("openclaw/plugin-sdk/agent-harness"),
+      requireFromWorkspace.resolve("openclaw/plugin-sdk/agent-harness-runtime"),
     ).href
   );
   // The stable SDK subpath exporting the sent-message hook mappers the real
@@ -372,9 +373,11 @@ async function main(): Promise<void> {
     // (openclaw dist `registry`: pluginId, hookName, handler, priority, source).
     const registerPlugin = (
       pluginConfig: Record<string, unknown> | undefined,
-    ): { typedHooks: TypedHook[]; logs: LogRecord[] } => {
+    ): { typedHooks: TypedHook[]; logs: LogRecord[]; tools: unknown[]; policies: unknown[] } => {
       const typedHooks: TypedHook[] = [];
       const logs: LogRecord[] = [];
+      const tools: unknown[] = [];
+      const policies: unknown[] = [];
       const logAt =
         (level: string) =>
         (...args: unknown[]): void => {
@@ -390,6 +393,9 @@ async function main(): Promise<void> {
           error: logAt("error"),
         },
         ...(pluginConfig === undefined ? {} : { pluginConfig }),
+        runtime: { state: { resolveStateDir: () => path.join(workspace, "state") } },
+        registerTool: (tool: unknown): void => { tools.push(tool); },
+        registerTrustedToolPolicy: (policy: unknown): void => { policies.push(policy); },
         on: (
           hookName: string,
           handler: unknown,
@@ -404,11 +410,11 @@ async function main(): Promise<void> {
           });
         },
       });
-      return { typedHooks, logs };
+      return { typedHooks, logs, tools, policies };
     };
 
     const initRunner = (typedHooks: TypedHook[], pluginIds: string[]) => {
-      pluginRuntime.initializeGlobalHookRunner({
+      hookRuntime.initializeGlobalHookRunner({
         hooks: [],
         typedHooks,
         plugins: pluginIds.map((id) => ({ id, status: "loaded" })),
@@ -436,24 +442,27 @@ async function main(): Promise<void> {
       const matching = defaultRegistration.typedHooks.filter(
         (hook) => hook.hookName === hookName,
       );
-      assert.equal(matching.length, 1, `exactly one ${hookName} handler`);
+      const expected = hookName === "before_agent_run" ? 1 : 2;
+      assert.equal(matching.length, expected, `expected ${expected} ${hookName} handler(s)`);
     }
+    assert.equal(defaultRegistration.tools.length, 1, "controller tool registered");
+    assert.equal(defaultRegistration.policies.length, 1, "scoped trusted tool policy registered");
 
     let runner = initRunner(defaultRegistration.typedHooks, [PLUGIN_ID]);
     assert.ok(runner, "global hook runner is available");
     assert.equal(
-      pluginRuntime.hasGlobalHooks(HOOK_NAME),
+      runner.hasHooks(HOOK_NAME),
       true,
       `${HOOK_NAME} is visible to the global runner`,
     );
     assert.equal(
-      pluginRuntime.hasGlobalHooks(TOOL_HOOK_NAME),
+      runner.hasHooks(TOOL_HOOK_NAME),
       false,
       `${TOOL_HOOK_NAME} must not be registered: its presence promotes Codex approvals globally`,
     );
     for (const hookName of RECEIPT_HOOK_NAMES) {
       assert.equal(
-        pluginRuntime.hasGlobalHooks(hookName),
+        runner.hasHooks(hookName),
         true,
         `${hookName} is visible to the global runner`,
       );
@@ -487,7 +496,7 @@ async function main(): Promise<void> {
       );
     }
     record(
-      "built entry registers message and receipt hooks only; the installed runner + harness + mapper contracts are present",
+      "built entry registers controller and migration surfaces; the installed runner + harness + mapper contracts are present",
     );
 
     const ctx = { channelId: SMOKE_SEND_CHANNEL };
@@ -606,7 +615,7 @@ async function main(): Promise<void> {
       "shipped default config (no pluginConfig) observes a missing receipt and finalizes untouched - end-to-end",
     );
 
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
 
     // ============ Installed-gate nullish normalization probes ==============
     const probeGateDecision = async (
@@ -630,7 +639,7 @@ async function main(): Promise<void> {
         { prompt: "smoke nullish probe", messages: [] },
         { trigger: "user" },
       );
-      pluginRuntime.resetGlobalHookRunner();
+      hookRuntime.resetGlobalHookRunner();
       return outcome as
         | { decision?: { outcome?: string; reason?: string } }
         | undefined;
@@ -852,7 +861,7 @@ async function main(): Promise<void> {
     );
     const uncorrelatableFinalize = await finalizeCheckpoint("cleanup");
 
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
 
     // Every before_agent_run scenario must come back from the *installed*
     // runner as an explicit pass decision attributed to this plugin. A void
@@ -1060,7 +1069,7 @@ async function main(): Promise<void> {
       idlessFinalizeEvent,
       idlessCtx,
     );
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
 
     assert.deepEqual(idlessStart, gatePass);
     assert.deepEqual(idlessSecondStart, gatePass);
@@ -1121,7 +1130,7 @@ async function main(): Promise<void> {
       BLOCKER_ID,
       "an earlier higher-priority block must stay attributed to the blocking plugin",
     );
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
 
     // A lower-priority block still wins over this guard's explicit pass.
     const stickyLate = registerPlugin({
@@ -1141,7 +1150,7 @@ async function main(): Promise<void> {
       "a later lower-priority block must not be un-stuck by this guard's explicit pass",
     );
     assert.equal(lateBlock?.pluginId, BLOCKER_ID);
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
     record(
       "two-handler gate composition: an earlier or later synthetic block stays sticky; this guard's explicit pass never overrides it",
     );
@@ -1223,7 +1232,7 @@ async function main(): Promise<void> {
       { runId: "smoke-run-override", messages: [], success: true },
       cronRunContext("override"),
     );
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
     record(
       "finalize-merge override: two overridden revise requests consume no budget; the guard's later winning revise is applied and charged for the bounded rounds, and the host then continues",
     );
@@ -1290,7 +1299,7 @@ async function main(): Promise<void> {
       ],
       "the installed harness accounting must charge the idempotency-key budget only when a revise decision wins the merge",
     );
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
     record(
       "installed finalize budget is charged per run and idempotency key only for revise decisions that win the merge - the contract the guard's accounting documents",
     );
@@ -1332,7 +1341,7 @@ async function main(): Promise<void> {
   } finally {
     process.stdout.write = realStdoutWrite;
     process.stderr.write = realStderrWrite;
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
     rmSync(workspace, { recursive: true, force: true });
   }
 

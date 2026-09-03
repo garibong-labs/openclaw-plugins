@@ -1,0 +1,19 @@
+{
+  "name": "ACP report controller",
+  "sessionTarget": "isolated",
+  "schedule": {
+    "kind": "every",
+    "everyMs": 600000
+  },
+  "payload": {
+    "kind": "agentTurn",
+    "message": "[acp-report-controller:v1]\nCall acp_report_controller exactly once with action=tick and leaseToken=LEASE_TOKEN. If status is delivery_pending, call message exactly once with action=send, message equal byte-for-byte to the returned message, and final=false; then stop. If status is none_due, stop. If status is terminal_acked or tracking_lost, call automations with action=remove and jobId=JOB_ID, then call acp_report_controller with action=release and the same leaseToken; then stop. For delivery_missing, delivery_uncertain, or error, do not send, remove, release, relaunch, or run shell commands; stop. Never compose, summarize, edit, split, or reuse report text."
+  },
+  "delivery": {
+    "mode": "announce",
+    "channel": "discord",
+    "to": "CONTROL_CONVERSATION_ID"
+  },
+  "enabled": true,
+  "deleteAfterRun": false
+}

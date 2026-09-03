@@ -1,7 +1,7 @@
 {
   "name": "openclaw-acp-lifecycle-guard",
-  "version": "0.4.3",
-  "description": "OpenClaw plugin that validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and tracks owner-checkpoint delivery receipts.",
+  "version": "0.5.0",
+  "description": "OpenClaw plugin that validates ACP lifecycle reports and runs a durable, fenced report-delivery controller.",
   "license": "MIT",
   "type": "module",
   "private": false,
@@ -12,7 +12,8 @@
     "dist",
     "openclaw.plugin.json",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "templates"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -23,7 +24,7 @@
     "prepack": "npm run build"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.7.1-2"
+    "openclaw": ">=2026.8.1"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -37,12 +38,12 @@
   "openclaw": {
     "extensions": ["./dist/index.js"],
     "compat": {
-      "pluginApi": ">=2026.7.1-2",
-      "minGatewayVersion": "2026.7.1-2"
+      "pluginApi": ">=2026.8.1",
+      "minGatewayVersion": "2026.8.1"
     },
     "build": {
-      "openclawVersion": "2026.7.1-2",
-      "pluginSdkVersion": "2026.7.1-2"
+      "openclawVersion": "2026.8.1",
+      "pluginSdkVersion": "2026.8.1"
     }
   }
 }

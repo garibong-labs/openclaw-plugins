@@ -80,7 +80,7 @@ const CLASSIFIER_RULES: readonly ClassifierRule[] = [
     nearTitleIntent:
       /(?:^|[^가-힣A-Za-z0-9_])(?:완료|종료|마무리)(?:$|[^가-힣A-Za-z0-9_])/u,
     excludedTitle:
-      /미완료|완료율|(?:완료|종료|마무리)(?:\s*보고)?\s*(?:하지|못|예정)|실패|취소|차단|중단|추적\s*(?:실패|불가|손실)|추적\s*놓침/u,
+      /미완료|완료율|(?:완료|종료|마무리)(?:\s*보고)?\s*(?:하지|못|예정)|차단|중단|추적\s*(?:실패|불가|손실)|추적\s*놓침/u,
     bodyAnchors: [
       ...METADATA_ANCHORS,
       /^⏱ \*\*ACP 소요\*\*: /u,
@@ -88,6 +88,20 @@ const CLASSIFIER_RULES: readonly ClassifierRule[] = [
       /^📦 \*\*결과\*\*$/u,
       /^🔍 \*\*다음\*\*$/u,
     ],
+  },
+  {
+    kind: "completion",
+    marker: "⛔",
+    canonicalPhrase: "ACP 취소 보고",
+    nearTitleIntent: /취소/u,
+    bodyAnchors: [...METADATA_ANCHORS, /^\u26D4 \*\*ACP 취소\*\*$/u, /^\uD83D\uDCE6 \*\*결과\*\*$/u],
+  },
+  {
+    kind: "completion",
+    marker: "❌",
+    canonicalPhrase: "ACP 실패 보고",
+    nearTitleIntent: /실패/u,
+    bodyAnchors: [...METADATA_ANCHORS, /^\u274C \*\*ACP 실패\*\*$/u, /^\uD83D\uDCE6 \*\*결과\*\*$/u],
   },
 ];
 

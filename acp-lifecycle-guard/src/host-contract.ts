@@ -2,7 +2,7 @@
  * Local mirror of the OpenClaw plugin-host surface this plugin consumes.
  *
  * These types are a hand-narrowed subset of the installed OpenClaw plugin SDK
- * (`openclaw@2026.7.1-2`, `dist/hook-types-*.d.ts` and `dist/types-*.d.ts`).
+ * (`openclaw@2026.8.1`, installed plugin SDK declarations).
  * They exist so the guard's pure policy modules and their unit tests can be
  * typechecked and executed without installing the full `openclaw` package,
  * which is declared as a peer dependency instead.
@@ -74,6 +74,14 @@ export type ToolHookContext = {
   toolName: string;
   toolCallId?: string;
   channelId?: string;
+  requester?: { senderIsOwner?: boolean };
+};
+
+export type PluginToolContext = {
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  senderIsOwner?: boolean;
 };
 
 /**
@@ -268,4 +276,15 @@ export type GuardHostApi = {
   logger: GuardLogger;
   pluginConfig?: Record<string, unknown>;
   on: GuardHookRegistrar;
+  runtime: { state: { resolveStateDir: () => string } };
+  registerTool: (
+    tool: unknown | ((ctx: PluginToolContext) => unknown),
+    opts?: { name?: string; optional?: boolean },
+  ) => void;
+  registerTrustedToolPolicy: (policy: {
+    id: string;
+    description: string;
+    matcher?: readonly [string, ...string[]];
+    evaluate: (event: BeforeToolCallEvent, ctx: ToolHookContext) => BeforeToolCallResult | void | Promise<BeforeToolCallResult | void>;
+  }) => void;
 };

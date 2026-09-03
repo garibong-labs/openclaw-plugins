@@ -53,6 +53,8 @@ export const ReasonCodes = {
   CompletionDurationDrift: `${REASON_CODE_PREFIX}.completion.duration_drift`,
   /** Completion report next-step bullet is not the canonical sentence. */
   CompletionNextLineDrift: `${REASON_CODE_PREFIX}.completion.next_line_drift`,
+  /** Completion report contains a recognized operational subject. */
+  CompletionForbiddenSubject: `${REASON_CODE_PREFIX}.completion.forbidden_subject`,
 
   /** Direct message-tool publication of an ACP intermediate report. */
   ToolDirectIntermediate: `${REASON_CODE_PREFIX}.tool.direct_intermediate_blocked`,
@@ -85,6 +87,17 @@ export const ReasonCodes = {
    * entry is retained as a bounded end-observed terminal candidate.
    */
   ReceiptEndUnproven: `${REASON_CODE_PREFIX}.receipt.end_unproven`,
+
+  ControllerCallerInvalid: `${REASON_CODE_PREFIX}.controller.caller_invalid`,
+  ControllerLeaseNotFound: `${REASON_CODE_PREFIX}.controller.lease_not_found`,
+  ControllerReleaseDenied: `${REASON_CODE_PREFIX}.controller.release_denied`,
+  ControllerActionInvalid: `${REASON_CODE_PREFIX}.controller.action_invalid`,
+  ControllerDigestAmbiguous: `${REASON_CODE_PREFIX}.controller.digest_ambiguous`,
+  ControllerScopeMismatch: `${REASON_CODE_PREFIX}.controller.scope_mismatch`,
+  ControllerAckFailed: `${REASON_CODE_PREFIX}.controller.ack_failed`,
+  LeaseEarlyCompletion: `${REASON_CODE_PREFIX}.controller.early_completion_blocked`,
+  LeaseFinalizeBlocked: `${REASON_CODE_PREFIX}.controller.finalize_blocked`,
+  LeaseAgentEndViolation: `${REASON_CODE_PREFIX}.controller.agent_end_violation`,
 } as const;
 
 export type ReasonCode = (typeof ReasonCodes)[keyof typeof ReasonCodes];

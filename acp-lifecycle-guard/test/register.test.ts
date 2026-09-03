@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { DEFAULT_GUARD_CONFIG } from "../src/config.ts";
 import type {
@@ -56,6 +59,9 @@ function createFakeApi(pluginConfig?: Record<string, unknown>): {
       error: record("error"),
     },
     ...(pluginConfig === undefined ? {} : { pluginConfig }),
+    runtime: { state: { resolveStateDir: () => mkdtempSync(path.join(tmpdir(), "acp-guard-test-")) } },
+    registerTool: () => {},
+    registerTrustedToolPolicy: () => {},
     on: ((
       hookName: string,
       handler: MessageSendingHandler | BeforeToolCallHandler,
@@ -73,15 +79,19 @@ const TOOL_CONTEXT = { toolName: "message" } as const;
 const MALFORMED_INTERMEDIATE = intermediateWithElapsed("⏱️ **ACP 시간**: 20분");
 
 describe("registerGuard", () => {
-  it("registers lifecycle and receipt hooks without before_tool_call", () => {
+  it("registers lifecycle, controller, and receipt hooks without a global before_tool_call", () => {
     const { api, registrations } = createFakeApi();
     registerGuard(api);
     const names = registrations.map((entry) => entry.hookName).sort();
     assert.deepEqual(names, [
       "agent_end",
+      "agent_end",
+      "before_agent_finalize",
       "before_agent_finalize",
       "before_agent_run",
       "message_sending",
+      "message_sending",
+      "message_sent",
       "message_sent",
     ]);
   });
@@ -89,12 +99,10 @@ describe("registerGuard", () => {
   it("registers message_sending at a late priority", () => {
     const { api, registrations } = createFakeApi();
     registerGuard(api);
-    const outbound = registrations.find(
-      (entry) => entry.hookName === "message_sending",
-    );
-    assert.ok(outbound);
-    assert.equal(typeof outbound.handler, "function");
-    assert.ok((outbound.opts?.priority ?? 0) < 0);
+    const outbound = registrations.filter((entry) => entry.hookName === "message_sending");
+    assert.equal(outbound.length, 2);
+    assert.ok(outbound.every((entry) => typeof entry.handler === "function"));
+    assert.ok(outbound.every((entry) => (entry.opts?.priority ?? 0) < 0));
   });
 });
 
@@ -352,7 +360,7 @@ describe("logging never carries raw outbound content", () => {
     );
   });
 
-  it("cancels a reachable tainted completion line without exposing content", () => {
+  it("passes bounded free-text terminal next values without logging content", () => {
     const { api, logs } = createFakeApi();
     const handler = createMessageSendingHandler(api, DEFAULT_GUARD_CONFIG);
     const tainted = replaceLine(
@@ -365,27 +373,8 @@ describe("logging never carries raw outbound content", () => {
       MESSAGE_CONTEXT,
     );
 
-    assert.deepEqual(result, {
-      cancel: true,
-      cancelReason: ReasonCodes.CompletionNextLineDrift,
-      metadata: {
-        pluginId: PLUGIN_ID,
-        lifecycleKind: "completion",
-        reasonCode: ReasonCodes.CompletionNextLineDrift,
-      },
-    });
-    assert.equal(logs.length, 1);
-    const emitted = [flatten(logs), JSON.stringify(result)].join("\n");
-    assert.equal(emitted.includes(SECRET_MARKER), false);
-    for (const line of tainted.split("\n")) {
-      if (line.trim().length > 0) {
-        assert.equal(emitted.includes(line), false);
-      }
-    }
-    assert.match(
-      flatten(logs),
-      /^\[acp-lifecycle-guard\] hook=message_sending outcome=cancelled kind=completion reason=acp_lifecycle_guard\.completion\.next_line_drift$/u,
-    );
+    assert.equal(result, undefined);
+    assert.equal(logs.length, 0);
   });
 
   it("omits message content when passing a legacy-label report with an advisory", () => {

@@ -37,6 +37,7 @@ import {
   RECEIPT_REVISE_IDEMPOTENCY_KEY,
   RECEIPT_REVISE_INSTRUCTION,
 } from "./receipt/checkpoint.ts";
+import { createControllerSurfaces } from "./controller/surfaces.ts";
 
 export const PLUGIN_ID = "acp-lifecycle-guard";
 
@@ -308,7 +309,7 @@ export function createReceiptHookHandlers(
     try {
       // Field sourcing mirrors the installed sent-message mappers
       // (`buildCanonicalSentMessageHookContext` -> `toPluginMessageSentEvent`
-      // / `toPluginMessageContext`, openclaw@2026.7.1-2): the context always
+      // / `toPluginMessageContext`, openclaw@2026.8.1): the context always
       // carries `channelId` and `conversationId` (the latter falling back to
       // the raw `to` inside the host), and `sessionKey`/`messageId` appear on
       // both projections of the same canonical value, so each fallback below
@@ -446,8 +447,12 @@ export function createReceiptHookHandlers(
 }
 
 export function registerGuard(api: GuardHostApi): void {
+  const controller = createControllerSurfaces(api);
   api.on("message_sending", createMessageSendingHandler(api), {
     priority: MESSAGE_SENDING_PRIORITY,
+  });
+  api.on("message_sending", controller.messageSending, {
+    priority: MESSAGE_SENDING_PRIORITY - 1,
   });
   const receipt = createReceiptHookHandlers(api);
   api.on("before_agent_run", receipt.beforeAgentRun, {
@@ -456,8 +461,15 @@ export function registerGuard(api: GuardHostApi): void {
   api.on("message_sent", receipt.messageSent, {
     priority: RECEIPT_HOOK_PRIORITY,
   });
+  api.on("message_sent", controller.messageSent, {
+    priority: RECEIPT_HOOK_PRIORITY,
+  });
   api.on("before_agent_finalize", receipt.beforeAgentFinalize, {
     priority: RECEIPT_HOOK_PRIORITY,
   });
+  api.on("before_agent_finalize", controller.beforeAgentFinalize, {
+    priority: RECEIPT_HOOK_PRIORITY + 1,
+  });
   api.on("agent_end", receipt.agentEnd, { priority: RECEIPT_HOOK_PRIORITY });
+  api.on("agent_end", controller.agentEnd, { priority: RECEIPT_HOOK_PRIORITY });
 }

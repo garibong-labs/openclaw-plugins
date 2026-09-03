@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0] - 2026-09-03
+
+- Add an owner-private atomic active-lease registry and the `acp_report_controller`
+  register/status/tick/release tool contract.
+- Execute the attested skills report pump in-process, retain fenced delivery
+  state privately, and acknowledge only exact host-proven logical deliveries.
+- Preserve distinct missing and uncertain delivery states until the attested
+  attempt TTL permits a newly fenced pump claim.
+- Bind ticks to the exact cron session/job and Discord destination/account,
+  including snowflake-derived receipt timestamps and multipart canonical IDs.
+- Enforce active leases across final message calls, yield, finalize, and
+  observable agent-end violations through a scoped trusted tool policy.
+- Align validation with `acp-reporting-v3` positive deltas, structured terminal
+  values, and completed/cancelled/failed terminal layouts.
+- Ship the deterministic every-ten-minute isolated automation payload template.
+
 All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

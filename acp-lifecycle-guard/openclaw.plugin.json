@@ -1,11 +1,14 @@
 {
   "id": "acp-lifecycle-guard",
   "name": "ACP Lifecycle Guard",
-  "description": "Validates canonical ACP lifecycle reports, cancels malformed ones before delivery, and tracks owner-checkpoint delivery receipts.",
-  "version": "0.4.3",
+  "description": "Validates ACP lifecycle reports and runs a durable, fenced report-delivery controller.",
+  "version": "0.5.0",
   "activation": {
     "onStartup": true,
     "onCapabilities": ["hook"]
+  },
+  "contracts": {
+    "trustedToolPolicies": ["acp-report-controller-lifecycle-v1"]
   },
   "configSchema": {
     "type": "object",
