@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1] - 2026-09-03
+
+- Replace the model-backed report automation with a bounded OpenClaw 2026.8.1
+  headless script payload using an exact controller/message/automations
+  allowlist and no fallback delivery.
+- Declare the controller's closed structured output contract, including its
+  exact registered destination and authenticated current-job cleanup identity.
+- Permit terminal lease inspection and release from a fresh authenticated run
+  in the same canonical owner session while denying active manual release and
+  retaining exact-run tick and lifecycle enforcement.
+- Execute the shipped script in tests to prove exact single-send behavior,
+  quiet error handling, cleanup ordering, and release-after-removal semantics.
+
 ## [0.5.0] - 2026-09-03
 
 - Add an owner-private atomic active-lease registry and the `acp_report_controller`

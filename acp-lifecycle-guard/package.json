@@ -1,6 +1,6 @@
 {
   "name": "openclaw-acp-lifecycle-guard",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "OpenClaw plugin that validates ACP lifecycle reports and runs a durable, fenced report-delivery controller.",
   "license": "MIT",
   "type": "module",

@@ -323,6 +323,8 @@ async function main(): Promise<void> {
   const openclawVersion = JSON.parse(
     readFileSync(path.join(openclawRoot, "package.json"), "utf8"),
   ).version as string;
+  assert.equal(openclawVersion, "2026.8.1",
+    "target-build smoke must run against the reviewed OpenClaw 2026.8.1 contract");
   process.stdout.write(
     `openclaw ${openclawVersion} (${HOOK_NAME} + receipt-hook runner)\n`,
   );
@@ -447,6 +449,27 @@ async function main(): Promise<void> {
     }
     assert.equal(defaultRegistration.tools.length, 1, "controller tool registered");
     assert.equal(defaultRegistration.policies.length, 1, "scoped trusted tool policy registered");
+    const controllerFactory = defaultRegistration.tools[0] as
+      (ctx: Record<string, unknown>) => Record<string, unknown>;
+    const controllerTool = controllerFactory({ agentId: "main",
+      sessionKey: "agent:main:discord:smoke-owner" });
+    assert.equal(controllerTool.name, "acp_report_controller");
+    assert.ok(controllerTool.outputSchema,
+      "the installed 2026.8.1 tool catalog requires a declared details schema for deterministic script field use");
+
+    const automationTemplate = JSON.parse(readFileSync(path.join(PLUGIN_ROOT,
+      "templates", "report-controller-automation.json"), "utf8")) as Record<string, unknown>;
+    const automationPayload = automationTemplate.payload as Record<string, unknown>;
+    assert.equal(automationPayload.kind, "script");
+    assert.equal(automationPayload.toolBudget, 5);
+    assert.deepEqual(automationPayload.toolsAllow,
+      ["acp_report_controller", "message", "automations"]);
+    assert.equal((automationTemplate.delivery as Record<string, unknown>).mode, "none");
+    assert.equal(Object.hasOwn(automationPayload, "model"), false);
+    assert.equal(Object.hasOwn(automationPayload, "message"), false);
+    assert.match(String(automationPayload.script),
+      /await automations\(\{ action: "remove", jobId: result\.jobId \}\);\n  await acp_report_controller/u,
+      "release must follow awaited removal of the authenticated current job");
 
     let runner = initRunner(defaultRegistration.typedHooks, [PLUGIN_ID]);
     assert.ok(runner, "global hook runner is available");
@@ -496,7 +519,7 @@ async function main(): Promise<void> {
       );
     }
     record(
-      "built entry registers controller and migration surfaces; the installed runner + harness + mapper contracts are present",
+      "built entry registers a structured controller; the shipped headless script and installed runner + harness + mapper contracts are present",
     );
 
     const ctx = { channelId: SMOKE_SEND_CHANNEL };

@@ -6,13 +6,18 @@
     "everyMs": 600000
   },
   "payload": {
-    "kind": "agentTurn",
-    "message": "[acp-report-controller:v1]\nCall acp_report_controller exactly once with action=tick and leaseToken=LEASE_TOKEN. If status is delivery_pending, call message exactly once with action=send, message equal byte-for-byte to the returned message, and final=false; then stop. If status is none_due, stop. If status is terminal_acked or tracking_lost, call automations with action=remove and jobId=JOB_ID, then call acp_report_controller with action=release and the same leaseToken; then stop. For delivery_missing, delivery_uncertain, or error, do not send, remove, release, relaunch, or run shell commands; stop. Never compose, summarize, edit, split, or reuse report text."
+    "kind": "script",
+    "script": "const leaseToken = \"LEASE_TOKEN\";\nconst cleanup = async (result) => {\n  if (result.status !== \"terminal_acked\" && result.status !== \"tracking_lost\") return;\n  await automations({ action: \"remove\", jobId: result.jobId });\n  await acp_report_controller({ action: \"release\", leaseToken });\n};\nconst first = await acp_report_controller({ action: \"tick\", leaseToken });\nif (first.status === \"delivery_pending\") {\n  await message({ action: \"send\", channel: first.destination.channel, target: first.destination.conversationId, accountId: first.destination.accountId, message: first.message, final: false });\n  const afterSend = await acp_report_controller({ action: \"tick\", leaseToken });\n  await cleanup(afterSend);\n  return;\n}\nawait cleanup(first);",
+    "timeoutSeconds": 60,
+    "toolBudget": 5,
+    "toolsAllow": [
+      "acp_report_controller",
+      "message",
+      "automations"
+    ]
   },
   "delivery": {
-    "mode": "announce",
-    "channel": "discord",
-    "to": "CONTROL_CONVERSATION_ID"
+    "mode": "none"
   },
   "enabled": true,
   "deleteAfterRun": false

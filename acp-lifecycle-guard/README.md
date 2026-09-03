@@ -15,12 +15,15 @@ The controller exposes four actions through one plugin tool:
 - `register`: main-owner only. Binds an opaque lease token to the exact owner
   session/run, ACP transport file and process handle, report-pump job,
   Discord conversation/account, and attested skills pump/transport entries.
-- `status`: available only to that owner run or the exact bound cron session.
+- `status`: available to an authenticated `main` owner run in the exact
+  registered owner session, or to the exact bound cron session. This permits
+  inspection after the registering run has ended without widening sessions.
 - `tick`: available only to `main` running as the exact `cron:<jobId>` session.
   It imports the attested skills pump in-process and returns either a fresh
   canonical `message`, `none_due`, or a terminal control status.
-- `release`: available to the owner, or to the bound cron session after a
-  `terminal_acked` or `tracking_lost` cleanup boundary.
+- `release`: available after `terminal_acked` or `tracking_lost` to an
+  authenticated `main` owner run in the exact registered owner session, or to
+  the bound cron session. Active manual release is explicitly denied.
 
 Registration requires these fields in addition to `action` and `leaseToken`:
 
@@ -83,19 +86,29 @@ expires. A later tick may then ask the pump to reclaim it under a new fence.
 relaunches ACP.
 
 After terminal acknowledgement, the next tick returns a `terminal_acked`
-status and the fixed cleanup value `remove_current_job_then_release_lease`.
-Tracking loss returns the same cleanup value with status `tracking_lost`. The
-isolated cron run must remove only its own job using the host's self-removal
-restriction, then release the lease. Cron-side release is denied while active.
+status, the authenticated current job id, and the fixed cleanup value
+`remove_current_job_then_release_lease`. Tracking loss returns the same cleanup
+fields with status `tracking_lost`. The isolated cron run must remove only its
+own job using the host's self-removal restriction, then release the lease.
+Every release is denied while active.
+
+The tool declares a closed structured output schema for every success, quiet,
+terminal, delivery, and error result. A pending result includes the exact
+registered Discord channel, account, and conversation route; scripts consume
+these declared fields directly rather than parsing rendered tool content.
 
 ## Automation payload
 
 [templates/report-controller-automation.json](templates/report-controller-automation.json)
 is the exact deterministic every-600000-ms isolated job template. Replace only
-the uppercase placeholders while preparing the private job. It has no shell
-command and no static report snapshot. The model does not generate or edit
-prose: it forwards the controller's returned message byte-for-byte with
-`message(final:false)`, or executes the fixed self-cleanup branch.
+`LEASE_TOKEN` while preparing the private job. Its OpenClaw 2026.8.1 `script`
+payload runs in the headless code-mode executor with a 60-second timeout, a
+five-call budget, and an exact three-tool allowlist. It has no model fields,
+shell command, static report snapshot, fallback delivery, or prose
+interpretation. It forwards the controller's returned message byte-for-byte
+with `message(final:false)` to the returned registered route, then performs one
+bounded tick. A terminal result removes the returned authenticated current job
+and releases only after removal succeeds; every other result stays silent.
 
 The host already restricts a cron run's `automations` tool to introspection and
 removal of its own job. The controller independently binds tick and release to
@@ -120,6 +133,13 @@ result. The plugin therefore cannot cancel an end after the host's bounded
 finalize revisions are exhausted. Durable persistence is the fallback: an
 unavoidable owner end never erases the lease, and the cron controller continues
 without the direct owner turn.
+
+Persisted terminal leases remain recoverable after that end: a fresh
+owner-authenticated `main` run in the same canonical owner session may inspect
+status and release `terminal_acked` or `tracking_lost`. A different session,
+agent, unauthenticated sender, or active lease is denied. Tick authority and all
+active lifecycle blocking remain bound to the original exact run and exact cron
+job.
 
 ## Lifecycle validation and migration
 

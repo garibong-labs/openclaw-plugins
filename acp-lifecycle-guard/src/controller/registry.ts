@@ -351,8 +351,8 @@ type PendingDelivery = {
 
 export type ControllerTickResult =
   | { status: "none_due" }
-  | { status: "delivery_pending"; message: string }
-  | { status: "terminal_acked" | "tracking_lost"; cleanup: "remove_current_job_then_release_lease" }
+  | { status: "delivery_pending"; message: string; destination: LeaseDestination }
+  | { status: "terminal_acked" | "tracking_lost"; cleanup: "remove_current_job_then_release_lease"; jobId: string }
   | { status: "delivery_missing" | "delivery_uncertain" };
 
 function exactCronJob(sessionKey: string | undefined): string | undefined {
@@ -408,7 +408,7 @@ export class ReportController {
   async tick(entry: ActiveLease, sessionKey: string): Promise<ControllerTickResult> {
     this.registry.revalidate(entry);
     if (entry.cleanupState !== "active") {
-      return { status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease" };
+      return { status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease", jobId: entry.jobId };
     }
     const existing = this.pending.get(entry.leaseHash);
     if (existing !== undefined && Date.now() < existing.expiresAtMs) {
@@ -437,7 +437,7 @@ export class ReportController {
     const status = result.status;
     if (status === "terminal_acked" || status === "tracking_lost") {
       this.registry.setCleanupState(entry, status);
-      return { status, cleanup: "remove_current_job_then_release_lease" };
+      return { status, cleanup: "remove_current_job_then_release_lease", jobId: entry.jobId };
     }
     if (status === "none_due") return { status };
     if (status !== "delivery_pending" || typeof result.message !== "string" ||
@@ -457,7 +457,7 @@ export class ReportController {
       expiresAtMs: claimedAtMs + (transport.REPORT_ATTEMPT_TTL_MS as number),
       outcome: "delivery_uncertain",
     });
-    return { status: "delivery_pending", message: result.message };
+    return { status: "delivery_pending", message: result.message, destination: { ...entry.destination } };
   }
 
   authorizeSending(content: string, context: { sessionKey?: string; channelId: string; accountId?: string; conversationId?: string }):

@@ -50,10 +50,38 @@ function log(api: Pick<GuardHostApi, "logger">, hook: string, outcome: string, r
   api.logger.warn?.(`[acp-lifecycle-guard] hook=${hook} outcome=${outcome} kind=controller reason=${reason}`);
 }
 
-function isOwner(entry: ActiveLease, admission: Admission): boolean {
+function isOwnerSession(entry: ActiveLease, admission: Admission): boolean {
   return admission.agentId === "main" && admission.owner &&
-    admission.sessionKey === entry.ownerSessionKey && admission.runId === entry.ownerRunId;
+    admission.sessionKey === entry.ownerSessionKey && typeof admission.runId === "string" && admission.runId.length > 0;
 }
+
+const CONTROLLER_OUTPUT_SCHEMA = {
+  oneOf: [
+    { type: "object", additionalProperties: false, required: ["status"],
+      properties: { status: { const: "registered" } } },
+    { type: "object", additionalProperties: false, required: ["status"],
+      properties: { status: { const: "released" } } },
+    { type: "object", additionalProperties: false, required: ["status"],
+      properties: { status: { const: "active" } } },
+    { type: "object", additionalProperties: false, required: ["status"],
+      properties: { status: { enum: ["none_due", "delivery_missing", "delivery_uncertain"] } } },
+    { type: "object", additionalProperties: false, required: ["status", "message", "destination"],
+      properties: {
+        status: { const: "delivery_pending" }, message: { type: "string" },
+        destination: { type: "object", additionalProperties: false,
+          required: ["channel", "accountId", "conversationId"], properties: {
+            channel: { const: "discord" }, accountId: { type: "string" }, conversationId: { type: "string" },
+          } },
+      } },
+    { type: "object", additionalProperties: false, required: ["status", "cleanup", "jobId"],
+      properties: {
+        status: { enum: ["terminal_acked", "tracking_lost"] },
+        cleanup: { const: "remove_current_job_then_release_lease" }, jobId: { type: "string" },
+      } },
+    { type: "object", additionalProperties: false, required: ["status", "code"],
+      properties: { status: { const: "error" }, code: { type: "string" } } },
+  ],
+} as const;
 
 export type ControllerSurfaces = {
   registry: LeaseRegistry;
@@ -112,6 +140,7 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
         snapshotFile: { type: "string" },
       },
     },
+    outputSchema: CONTROLLER_OUTPUT_SCHEMA,
     async execute(toolCallId: string, raw: unknown): Promise<Record<string, unknown>> {
       const admission = admissions.get(toolCallId);
       admissions.delete(toolCallId);
@@ -138,13 +167,15 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
         }
         if (!entry) throw new Error(ReasonCodes.ControllerLeaseNotFound);
         const cron = controller.callerMatchesCron(entry, admission.agentId, admission.sessionKey);
-        const owner = isOwner(entry, admission);
+        const ownerSession = isOwnerSession(entry, admission);
         if (action === "status") {
-          if (!owner && !cron) throw new Error(ReasonCodes.ControllerCallerInvalid);
-          return toolResult({ status: entry.cleanupState });
+          if (!ownerSession && !cron) throw new Error(ReasonCodes.ControllerCallerInvalid);
+          return toolResult(entry.cleanupState === "active" ? { status: "active" } : {
+            status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease", jobId: entry.jobId,
+          });
         }
         if (action === "release") {
-          if (!owner && !(cron && entry.cleanupState !== "active")) {
+          if (entry.cleanupState === "active" || (!ownerSession && !cron)) {
             throw new Error(ReasonCodes.ControllerReleaseDenied);
           }
           registry.release(entry);

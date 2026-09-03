@@ -130,7 +130,8 @@ describe("controller caller and delivery binding", () => {
     const entry = register(registry, f);
     const controller = new ReportController(registry);
     const sessionKey = "agent:main:cron:job-example-1:run:tick-1";
-    assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_pending", message: f.message });
+    assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_pending", message: f.message,
+      destination: entry.destination });
     assert.equal(controller.authorizeSending(f.message, { sessionKey, channelId: "discord",
       accountId: "wrong-account", conversationId: entry.destination.conversationId }), "scope_mismatch");
     assert.equal(controller.authorizeSending(f.message, { sessionKey, channelId: "discord",
@@ -184,7 +185,8 @@ describe("controller caller and delivery binding", () => {
     assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_missing" });
     const internals = controller as unknown as { pending: Map<string, { expiresAtMs: number }> };
     internals.pending.get(entry.leaseHash)!.expiresAtMs = 0;
-    assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_pending", message: f.message });
+    assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_pending", message: f.message,
+      destination: entry.destination });
     controller.authorizeSending(f.message, context);
     (globalThis as Record<string, unknown>).__acpControllerAck = "throw";
     const messageId = (BigInt(Date.now() - 1420070400000) << 22n).toString();
@@ -201,7 +203,8 @@ describe("controller caller and delivery binding", () => {
       (globalThis as Record<string, unknown>).__acpControllerPumpStatus = terminal;
       const result = await new ReportController(registry).tick(entry,
         "agent:main:cron:job-example-1:run:tick-1");
-      assert.deepEqual(result, { status: terminal, cleanup: "remove_current_job_then_release_lease" });
+      assert.deepEqual(result, { status: terminal, cleanup: "remove_current_job_then_release_lease",
+        jobId: "job-example-1" });
       assert.equal(registry.getByToken("lease-token-example-00000001")?.cleanupState, terminal);
     });
   }
@@ -246,5 +249,81 @@ describe("receipt time and lifecycle enforcement", () => {
     surfaces.agentEnd({ messages: [], success: true }, ctx);
     assert.ok(logs.some((line) => line.includes(ReasonCodes.LeaseAgentEndViolation)));
     assert.ok(logs.every((line) => !line.includes("example-owner") && !line.includes("owner-run")));
+  });
+
+  it("allows terminal recovery only to a fresh authenticated run in the same owner session", async () => {
+    const f = fixture();
+    const logs: string[] = [];
+    let policy: { evaluate: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown } | undefined;
+    let toolFactory: ((ctx: Record<string, unknown>) => { outputSchema?: unknown;
+      execute: (id: string, params: unknown) => Promise<Record<string, unknown>> }) | undefined;
+    const api = {
+      id: "acp-lifecycle-guard", logger: { warn: (line: unknown) => logs.push(String(line)) },
+      runtime: { state: { resolveStateDir: () => f.state } }, on: () => {},
+      registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
+      registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
+    } as unknown as GuardHostApi;
+    const surfaces = createControllerSurfaces(api);
+    const entry = register(surfaces.registry, f);
+    surfaces.registry.setCleanupState(entry, "terminal_acked");
+
+    const invoke = async (id: string, ctx: Record<string, unknown>, action: "status" | "tick" | "release") => {
+      policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id, params: { action } }, ctx);
+      return toolFactory!(ctx).execute(id, { action, leaseToken: "lease-token-example-00000001" });
+    };
+    const freshOwner = { toolName: "acp_report_controller", agentId: "main",
+      sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-2",
+      requester: { senderIsOwner: true } };
+    const status = await invoke("fresh-status", freshOwner, "status");
+    assert.deepEqual(status.details, { status: "terminal_acked",
+      cleanup: "remove_current_job_then_release_lease", jobId: "job-example-1" });
+    assert.ok(toolFactory!(freshOwner).outputSchema, "the controller must declare its structured output contract");
+
+    const wrongSession = await invoke("wrong-session", { ...freshOwner,
+      sessionKey: "agent:main:discord:example-other" }, "status");
+    assert.equal((wrongSession.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
+    const wrongSessionRelease = await invoke("wrong-session-release", { ...freshOwner,
+      sessionKey: "agent:main:discord:example-other" }, "release");
+    assert.equal((wrongSessionRelease.details as Record<string, unknown>).code, ReasonCodes.ControllerReleaseDenied);
+    const wrongAgent = await invoke("wrong-agent", { ...freshOwner, agentId: "helper" }, "status");
+    assert.equal((wrongAgent.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
+    const wrongAgentRelease = await invoke("wrong-agent-release", { ...freshOwner, agentId: "helper" }, "release");
+    assert.equal((wrongAgentRelease.details as Record<string, unknown>).code, ReasonCodes.ControllerReleaseDenied);
+    const unauthenticated = await invoke("unauthenticated", { ...freshOwner,
+      requester: { senderIsOwner: false } }, "status");
+    assert.equal((unauthenticated.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
+    const freshTick = await invoke("fresh-tick", freshOwner, "tick");
+    assert.equal((freshTick.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
+    assert.ok(logs.some((line) => line.includes(ReasonCodes.ControllerCallerInvalid)));
+    assert.ok(logs.some((line) => line.includes(ReasonCodes.ControllerReleaseDenied)));
+    assert.ok(logs.every((line) => !line.includes("example-owner") &&
+      !line.includes("owner-run") && !line.includes("lease-token")));
+
+    const released = await invoke("fresh-release", freshOwner, "release");
+    assert.deepEqual(released.details, { status: "released" });
+    assert.equal(surfaces.registry.getByToken("lease-token-example-00000001"), undefined);
+  });
+
+  it("explicitly denies manual release while a lease is active, including the original owner run", async () => {
+    const f = fixture();
+    let policy: { evaluate: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown } | undefined;
+    let toolFactory: ((ctx: Record<string, unknown>) => {
+      execute: (id: string, params: unknown) => Promise<Record<string, unknown>> }) | undefined;
+    const api = {
+      id: "acp-lifecycle-guard", logger: { warn: () => {} },
+      runtime: { state: { resolveStateDir: () => f.state } }, on: () => {},
+      registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
+      registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
+    } as unknown as GuardHostApi;
+    const surfaces = createControllerSurfaces(api);
+    register(surfaces.registry, f);
+    const owner = { toolName: "acp_report_controller", agentId: "main",
+      sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-1",
+      requester: { senderIsOwner: true } };
+    policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "active-release", params: {} }, owner);
+    const result = await toolFactory!(owner).execute("active-release",
+      { action: "release", leaseToken: "lease-token-example-00000001" });
+    assert.equal((result.details as Record<string, unknown>).code, ReasonCodes.ControllerReleaseDenied);
+    assert.ok(surfaces.registry.getByToken("lease-token-example-00000001"));
   });
 });
