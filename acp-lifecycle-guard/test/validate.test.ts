@@ -234,7 +234,7 @@ describe("intermediate drift", () => {
         "📍 **작업**: `example-repo` · `feat/example`",
       ),
       3,
-      "🤖 **ACP**: example-harness · `example-model-1`",
+      "🤖 **ACP**: Codex · `example-model-1`",
     );
     expectRejected(swapped, ReasonCodes.MetadataLineDrift);
   });
@@ -244,8 +244,16 @@ describe("intermediate drift", () => {
       replaceLine(
         CANONICAL_INTERMEDIATE,
         2,
-        "🤖 **ACP**: example-harness · example-model-1",
+        "🤖 **ACP**: Codex · example-model-1",
       ),
+      ReasonCodes.MetadataLineDrift,
+    );
+  });
+
+  it("rejects harnesses outside the controller's closed Claude Code/Codex set", () => {
+    expectRejected(
+      replaceLine(CANONICAL_INTERMEDIATE, 2,
+        "🤖 **ACP**: example-harness · `example-model-1`"),
       ReasonCodes.MetadataLineDrift,
     );
   });

@@ -8,6 +8,7 @@
     "onCapabilities": ["hook"]
   },
   "contracts": {
+    "tools": ["acp_report_controller"],
     "trustedToolPolicies": ["acp-report-controller-lifecycle-v1"]
   },
   "configSchema": {

@@ -6,6 +6,21 @@ plugin is versioned independently of the repository and follows
 
 ## [0.6.0] - 2026-09-03
 
+- Declare `acp_report_controller` in `contracts.tools` and verify registration
+  through the real OpenClaw 2026.8.1 loader, including the explicit
+  `allowConversationAccess` installation grant and its bounded denial state.
+- Replace raw report/route controller results with a one-shot opaque
+  publication token; the trusted policy now injects the exact private report
+  and route at the message-tool boundary while retaining digest, scope, fence,
+  and receipt enforcement.
+- Filter equal report digests by exact cron session, channel, account, and
+  conversation before ambiguity checks.
+- Defer persisted path re-attestation until sensitive actions, cap repeated
+  prepared leases per owner, and allow transport-proven preactivation recovery
+  by the exact owner or job without time-only deletion.
+- Make the direct controller's POSIX/getuid and no-symlink-ancestor boundaries
+  explicit while preserving base guard loading, and close report harness
+  metadata to Claude Code and Codex so guard and parser acceptance agree.
 - Add durable `prepared` and `active` lease phases; registration now prepares
   only, prepared leases block owner completion, and cron ticks cannot publish.
 - Add same-owner-session `commit_activation`, which accepts activation only

@@ -73,18 +73,15 @@ const CONTROLLER_OUTPUT_SCHEMA = {
       properties: { status: { const: "active" } } },
     { type: "object", additionalProperties: false, required: ["status"],
       properties: { status: { enum: ["none_due", "delivery_missing", "delivery_uncertain"] } } },
-    { type: "object", additionalProperties: false, required: ["status", "message", "destination"],
+    { type: "object", additionalProperties: false, required: ["status", "publicationToken"],
       properties: {
-        status: { const: "delivery_pending" }, message: { type: "string" },
-        destination: { type: "object", additionalProperties: false,
-          required: ["channel", "accountId", "conversationId"], properties: {
-            channel: { const: "discord" }, accountId: { type: "string" }, conversationId: { type: "string" },
-          } },
+        status: { const: "delivery_pending" },
+        publicationToken: { type: "string", minLength: 16, maxLength: 128 },
       } },
-    { type: "object", additionalProperties: false, required: ["status", "cleanup", "jobId"],
+    { type: "object", additionalProperties: false, required: ["status", "cleanup"],
       properties: {
         status: { enum: ["terminal_acked", "tracking_lost"] },
-        cleanup: { const: "remove_current_job_then_release_lease" }, jobId: { type: "string" },
+        cleanup: { const: "remove_current_job_then_release_lease" },
       } },
     { type: "object", additionalProperties: false, required: ["status", "code"],
       properties: { status: { const: "error" }, code: { type: "string" } } },
@@ -146,6 +143,23 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           owner: ctx.requester?.senderIsOwner === true,
         });
         return;
+      }
+      if (event.toolName === "message") {
+        const prepared = controller.prepareMessageTool(object(event.params), {
+          ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
+          ...(ctx.sessionKey === undefined ? {} : { sessionKey: ctx.sessionKey }),
+        });
+        if (prepared.outcome === "authorized") return { params: prepared.params! };
+        if (prepared.outcome !== "unrelated") {
+          const reason = prepared.outcome === "ambiguous"
+            ? ReasonCodes.ControllerDigestAmbiguous
+            : ReasonCodes.ControllerScopeMismatch;
+          return { block: true, blockReason: reason };
+        }
+        if (registry.leasesForCron(ctx.agentId, ctx.sessionKey).length > 0) {
+          log(api, "trusted_tool_policy", "blocked", ReasonCodes.LeaseEarlyCompletion);
+          return { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion };
+        }
       }
       const leases = registry.leasesForOwner(ctx.sessionKey, ctx.runId);
       if (leases.length === 0) return;
@@ -212,14 +226,14 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           return toolResult({ status: "active" });
         }
         if (action === "abort_preactivation") {
-          if (!ownerSession) throw new Error(ReasonCodes.ControllerPreactivationAbortDenied);
+          if (!ownerSession && !cron) throw new Error(ReasonCodes.ControllerPreactivationAbortDenied);
           await registry.abortPreactivation(entry);
           return toolResult({ status: "aborted" });
         }
         if (action === "status") {
           if (!ownerSession && !cron) throw new Error(ReasonCodes.ControllerCallerInvalid);
           return toolResult(entry.cleanupState === null ? { status: entry.phase } : {
-            status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease", jobId: entry.jobId,
+            status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease",
           });
         }
         if (action === "release") {
@@ -246,7 +260,15 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
     registry,
     controller,
     messageSending(event, ctx) {
-      const outcome = controller.authorizeSending(event.content, ctx);
+      let outcome: ReturnType<ReportController["authorizeSending"]>;
+      try {
+        outcome = controller.authorizeSending(event.content, ctx);
+      } catch (error) {
+        const reason = safeControllerCode(error);
+        log(api, "message_sending", "cancelled", reason);
+        return { cancel: true, cancelReason: reason,
+          metadata: { pluginId: "acp-lifecycle-guard", reasonCode: reason } };
+      }
       if (outcome === "unrelated" || outcome === "authorized") return;
       const reason = outcome === "ambiguous" ? ReasonCodes.ControllerDigestAmbiguous : ReasonCodes.ControllerScopeMismatch;
       log(api, "message_sending", "cancelled", reason);

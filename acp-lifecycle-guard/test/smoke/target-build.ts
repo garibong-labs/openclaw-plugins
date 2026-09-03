@@ -99,6 +99,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -262,10 +263,10 @@ function stageTargetBuild(openclawRoot: string): {
   mkdirSync(path.join(workspace, "node_modules"), { recursive: true });
   symlinkSync(openclawRoot, path.join(workspace, "node_modules", "openclaw"));
   cpSync(distDir, path.join(workspace, "dist"), { recursive: true });
-  writeFileSync(
-    path.join(workspace, "package.json"),
-    `${JSON.stringify({ name: `${PLUGIN_ID}-smoke`, private: true, type: "module" }, null, 2)}\n`,
-  );
+  cpSync(path.join(PLUGIN_ROOT, "openclaw.plugin.json"),
+    path.join(workspace, "openclaw.plugin.json"));
+  const packageDocument = JSON.parse(readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
+  writeFileSync(path.join(workspace, "package.json"), `${JSON.stringify(packageDocument, null, 2)}\n`);
 
   // Keep any host-side logging inside the disposable workspace.
   process.env.OPENCLAW_HOME = path.join(workspace, "openclaw-home");
@@ -275,6 +276,47 @@ function stageTargetBuild(openclawRoot: string): {
     workspace,
     entryUrl: pathToFileURL(path.join(workspace, "dist", "index.js")),
   };
+}
+
+function inspectStagedRuntime(
+  openclawRoot: string,
+  workspace: string,
+  allowConversationAccess: boolean,
+): Record<string, unknown> {
+  const configPath = path.join(workspace,
+    allowConversationAccess ? "config-granted.json" : "config-enable-only.json");
+  writeFileSync(configPath, `${JSON.stringify({
+    plugins: {
+      load: { paths: [workspace] },
+      entries: {
+        [PLUGIN_ID]: {
+          enabled: true,
+          ...(allowConversationAccess ? { hooks: { allowConversationAccess: true } } : {}),
+        },
+      },
+    },
+  }, null, 2)}\n`);
+  const childTemp = path.join(workspace, "tmp");
+  const childCache = path.join(workspace, "cache");
+  mkdirSync(childTemp, { recursive: true });
+  mkdirSync(childCache, { recursive: true });
+  const inspected = spawnSync(process.execPath, [path.join(openclawRoot, "openclaw.mjs"),
+    "plugins", "inspect", PLUGIN_ID, "--runtime", "--json"], {
+    cwd: workspace,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OPENCLAW_HOME: path.join(workspace,
+        allowConversationAccess ? "inspect-home-granted" : "inspect-home-enable-only"),
+      OPENCLAW_CONFIG_PATH: configPath,
+      OPENCLAW_QA_TEMP_ROOT: childTemp,
+      TMPDIR: childTemp,
+      XDG_CACHE_HOME: childCache,
+    },
+  });
+  assert.equal(inspected.status, 0,
+    `isolated runtime inspect failed: ${inspected.stderr || inspected.stdout}`);
+  return JSON.parse(inspected.stdout) as Record<string, unknown>;
 }
 
 /**
@@ -357,6 +399,11 @@ async function main(): Promise<void> {
       requireFromWorkspace.resolve("openclaw/plugin-sdk/hook-runtime"),
     ).href
   );
+  const policyBundleName = readdirSync(path.join(openclawRoot, "dist")).find((name) =>
+    name.startsWith("agent-tools.before-tool-call-") && name.endsWith(".js"));
+  assert.ok(policyBundleName, "installed trusted-tool policy runtime bundle is missing");
+  const agentToolPolicyRuntime = await import(pathToFileURL(
+    path.join(openclawRoot, "dist", policyBundleName)).href);
 
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -370,6 +417,34 @@ async function main(): Promise<void> {
     assert.equal(entry.id, PLUGIN_ID, "built entry keeps its plugin id");
     assert.equal(typeof entry.register, "function", "built entry registers");
     record("built dist/index.js loads against the installed plugin SDK");
+
+    const grantedInspect = inspectStagedRuntime(openclawRoot, workspace, true);
+    const grantedPlugin = grantedInspect.plugin as Record<string, unknown>;
+    assert.deepEqual(grantedPlugin.toolNames, ["acp_report_controller"]);
+    assert.deepEqual((grantedInspect.typedHooks as Array<Record<string, unknown>>)
+      .map((hook) => hook.name).sort(),
+    ["agent_end", "agent_end", "before_agent_finalize", "before_agent_finalize",
+      "before_agent_run", "message_sending", "message_sending", "message_sent", "message_sent"].sort());
+    const grantedDiagnostics = grantedInspect.diagnostics as Array<Record<string, unknown>>;
+    assert.equal(grantedDiagnostics.some((diagnostic) =>
+      String(diagnostic.message).includes("plugin must declare contracts.tools") ||
+      String(diagnostic.message).includes("typed hook") && String(diagnostic.message).includes("blocked")), false);
+
+    const enableOnlyInspect = inspectStagedRuntime(openclawRoot, workspace, false);
+    const enableOnlyPlugin = enableOnlyInspect.plugin as Record<string, unknown>;
+    assert.deepEqual(enableOnlyPlugin.toolNames, ["acp_report_controller"]);
+    const enableOnlyHookNames = (enableOnlyInspect.typedHooks as Array<Record<string, unknown>>)
+      .map((hook) => hook.name);
+    for (const hookName of ["before_agent_run", "before_agent_finalize", "agent_end"]) {
+      assert.equal(enableOnlyHookNames.includes(hookName), false,
+        `${hookName} must not be presented as installed without conversation access`);
+    }
+    const enableOnlyDiagnostics = enableOnlyInspect.diagnostics as Array<Record<string, unknown>>;
+    for (const hookName of ["before_agent_run", "before_agent_finalize", "agent_end"]) {
+      assert.ok(enableOnlyDiagnostics.some((diagnostic) =>
+        diagnostic.message === `typed hook "${hookName}" blocked because non-bundled plugins must set plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess=true`));
+    }
+    record("real isolated loader registers the controller tool and granted hook set; enable-only emits bounded conversation-hook diagnostics");
 
     // Mirror how the host turns `api.on(...)` into a typed hook registration
     // (openclaw dist `registry`: pluginId, hookName, handler, priority, source).
@@ -415,14 +490,41 @@ async function main(): Promise<void> {
       return { typedHooks, logs, tools, policies };
     };
 
-    const initRunner = (typedHooks: TypedHook[], pluginIds: string[]) => {
+    const initRunner = (typedHooks: TypedHook[], pluginIds: string[], trustedToolPolicies: unknown[] = []) => {
       hookRuntime.initializeGlobalHookRunner({
         hooks: [],
         typedHooks,
+        trustedToolPolicies,
         plugins: pluginIds.map((id) => ({ id, status: "loaded" })),
       });
       return pluginRuntime.getGlobalHookRunner();
     };
+
+    const policyProbeRunner = initRunner([], ["smoke-policy-probe"], [{
+      pluginId: "smoke-policy-probe",
+      pluginName: "Smoke policy probe",
+      origin: "config",
+      source: "smoke:target-build",
+      rootDir: workspace,
+      policy: {
+        id: "smoke-policy-params-v1",
+        description: "Prove trusted policies can replace message-tool parameters.",
+        matcher: ["message"],
+        evaluate: () => ({ params: { action: "send", message: "injected", final: false } }),
+      },
+    }]);
+    assert.ok(policyProbeRunner);
+    const policyProbe = await agentToolPolicyRuntime.b({
+      toolName: "message",
+      params: { action: "send", message: "opaque", final: false },
+      toolCallId: "smoke-policy-call",
+      ctx: { agentId: "main", sessionKey: "agent:main:cron:smoke-policy:run:example" },
+    }) as Record<string, unknown>;
+    assert.deepEqual(policyProbe.params,
+      { action: "send", message: "injected", final: false },
+      `installed trusted policy failed to replace params: ${JSON.stringify(policyProbe)}`);
+    hookRuntime.resetGlobalHookRunner();
+    record("installed trusted-tool policy runtime applies bounded parameter replacement before execution");
 
     // Capture everything the host and the plugin emit during dispatch.
     process.stdout.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
@@ -473,8 +575,11 @@ async function main(): Promise<void> {
     assert.equal(Object.hasOwn(automationPayload, "model"), false);
     assert.equal(Object.hasOwn(automationPayload, "message"), false);
     assert.match(String(automationPayload.script),
-      /await automations\(\{ action: "remove", jobId: result\.jobId \}\);\n  await acp_report_controller/u,
+      /await automations\(\{ action: "remove", jobId \}\);\n  await acp_report_controller/u,
       "release must follow awaited removal of the authenticated current job");
+    assert.match(String(automationPayload.script),
+      /message\(\{ action: "send", message: first\.publicationToken, final: false \}\)/u,
+      "automation must expose only the opaque publication token to the message tool call");
 
     let runner = initRunner(defaultRegistration.typedHooks, [PLUGIN_ID]);
     assert.ok(runner, "global hook runner is available");

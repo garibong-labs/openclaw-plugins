@@ -125,6 +125,23 @@ describe("registerGuard", () => {
     assert.ok(outbound.every((entry) => typeof entry.handler === "function"));
     assert.ok(outbound.every((entry) => (entry.opts?.priority ?? 0) < 0));
   });
+
+  it("keeps the base lifecycle guard loaded when the POSIX controller is unavailable", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, "getuid");
+    assert.ok(descriptor);
+    Object.defineProperty(process, "getuid", { ...descriptor, value: undefined });
+    try {
+      const { api, registrations, logs } = createFakeApi();
+      registerGuard(api);
+      assert.deepEqual(registrations.map((entry) => entry.hookName).sort(), [
+        "agent_end", "before_agent_finalize", "before_agent_run", "message_sending", "message_sent",
+      ]);
+      assert.ok(logs.some((entry) => entry.args.some((arg) =>
+        String(arg).includes("acp_lifecycle_guard.controller.posix_required"))));
+    } finally {
+      Object.defineProperty(process, "getuid", descriptor);
+    }
+  });
 });
 
 describe("message_sending handler", () => {

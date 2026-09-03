@@ -30,6 +30,28 @@ marketplace manifest.
 > them for you, and no plugin here should be treated as active until an operator
 > has verified its behavior on the target build.
 
+For `acp-lifecycle-guard`, OpenClaw 2026.8.1 also requires the non-bundled
+conversation-hook grant at installation time:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "acp-lifecycle-guard": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+Enable-only configuration blocks `before_agent_run`,
+`before_agent_finalize`, and `agent_end`; it is a bounded diagnostic state, not
+a fully functional rollout. See the plugin README for the isolated runtime
+inspection gate. Operators remain responsible for applying configuration and
+restarting the intended Gateway after review.
+
 ## Local development
 
 ```bash

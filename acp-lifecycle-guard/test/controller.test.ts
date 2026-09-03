@@ -8,7 +8,9 @@ import { afterEach, describe, it } from "node:test";
 import { createControllerSurfaces } from "../src/controller/surfaces.ts";
 import {
   LeaseRegistry,
+  MAX_PREPARED_LEASES_PER_OWNER,
   ReportController,
+  assertPosixControllerPlatform,
   discordSnowflakeInstant,
   type ActiveLease,
 } from "../src/controller/registry.ts";
@@ -98,6 +100,23 @@ async function activate(registry: LeaseRegistry, entry: ActiveLease): Promise<Ac
   return entry;
 }
 
+async function preparePublication(
+  controller: ReportController,
+  entry: ActiveLease,
+  sessionKey: string,
+): Promise<Record<string, unknown>> {
+  const result = await controller.tick(entry, sessionKey);
+  assert.equal(result.status, "delivery_pending");
+  assert.ok("publicationToken" in result);
+  const prepared = controller.prepareMessageTool({
+    action: "send",
+    message: result.publicationToken,
+    final: false,
+  }, { agentId: "main", sessionKey });
+  assert.equal(prepared.outcome, "authorized");
+  return prepared.params!;
+}
+
 describe("owner-private persistent lease registry", () => {
   it("registers and durably reloads only a prepared lease", () => {
     const f = fixture();
@@ -124,6 +143,68 @@ describe("owner-private persistent lease registry", () => {
     const link = path.join(second.root, "linked-transport.json");
     fs.symlinkSync(second.transport, link);
     assert.throws(() => register(new LeaseRegistry(second.state), second, { transportFile: link }), /path_unsafe/u);
+
+    const ancestor = path.join(second.root, "linked-ancestor");
+    fs.symlinkSync(second.root, ancestor);
+    assert.throws(() => register(new LeaseRegistry(second.state), second, {
+      leaseToken: "lease-token-example-00000002",
+      ownerRunId: "owner-run-example-2",
+      jobId: "job-example-2",
+      transportFile: path.join(ancestor, path.basename(second.transport)),
+    }), /path_unsafe/u);
+  });
+
+  it("declares the direct controller POSIX-only instead of weakening uid checks", () => {
+    assert.doesNotThrow(() => assertPosixControllerPlatform(process.getuid));
+    assert.throws(() => assertPosixControllerPlatform(undefined), /controller\.posix_required/u);
+  });
+
+  it("reloads unrelated leases without touching a missing stale transport", () => {
+    const stale = fixture();
+    const live = fixture();
+    const first = new LeaseRegistry(stale.state);
+    register(first, stale);
+    const liveEntry = register(first, live, {
+      leaseToken: "lease-token-example-00000002",
+      ownerSessionKey: "agent:main:discord:example-owner-2",
+      ownerRunId: "owner-run-example-2",
+      jobId: "job-example-2",
+    });
+    fs.unlinkSync(stale.transport);
+    const reloaded = new LeaseRegistry(stale.state);
+    assert.ok(reloaded.getByToken("lease-token-example-00000001"));
+    assert.doesNotThrow(() => reloaded.revalidate(reloaded.getByHash(liveEntry.leaseHash)!));
+    assert.throws(() => reloaded.revalidate(reloaded.getByToken("lease-token-example-00000001")!),
+      /path_unavailable/u);
+    const added = fixture();
+    assert.doesNotThrow(() => register(reloaded, added, {
+      leaseToken: "lease-token-example-00000003",
+      ownerSessionKey: "agent:main:discord:example-owner-3",
+      ownerRunId: "owner-run-example-3",
+      processHandle: "process-example-3",
+      jobId: "job-example-3",
+    }));
+  });
+
+  it("bounds repeated prepared failures per owner until evidence-based recovery", () => {
+    const first = fixture();
+    const registry = new LeaseRegistry(first.state);
+    for (let index = 0; index < MAX_PREPARED_LEASES_PER_OWNER; index += 1) {
+      const current = index === 0 ? first : fixture();
+      register(registry, current, {
+        leaseToken: `lease-token-example-${String(index + 1).padStart(8, "0")}`,
+        ownerRunId: `owner-run-example-${index + 1}`,
+        processHandle: `process-example-${index + 1}`,
+        jobId: `job-example-${index + 1}`,
+      });
+    }
+    const overflow = fixture();
+    assert.throws(() => register(registry, overflow, {
+      leaseToken: "lease-token-example-00000099",
+      ownerRunId: "owner-run-example-99",
+      processHandle: "process-example-99",
+      jobId: "job-example-99",
+    }), /prepared_recovery_required/u);
   });
 
   it("detects content changes to an attested executable even when size and mtime are preserved", () => {
@@ -167,8 +248,10 @@ describe("controller caller and delivery binding", () => {
     await activate(registry, entry);
     const controller = new ReportController(registry);
     const sessionKey = "agent:main:cron:job-example-1:run:tick-1";
-    assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_pending", message: f.message,
-      destination: entry.destination });
+    const adjusted = await preparePublication(controller, entry, sessionKey);
+    assert.deepEqual(adjusted, { action: "send", channel: "discord",
+      target: entry.destination.conversationId, accountId: entry.destination.accountId,
+      message: f.message, final: false });
     assert.equal(controller.authorizeSending(f.message, { sessionKey, channelId: "discord",
       accountId: "wrong-account", conversationId: entry.destination.conversationId }), "scope_mismatch");
     assert.equal(controller.authorizeSending(f.message, { sessionKey, channelId: "discord",
@@ -188,6 +271,36 @@ describe("controller caller and delivery binding", () => {
       accountId: entry.destination.accountId, conversationId: entry.destination.conversationId }), "ambiguous");
   });
 
+  it("authorizes equal report digests independently after filtering exact scope", async () => {
+    const first = fixture();
+    const second = fixture();
+    const registry = new LeaseRegistry(first.state);
+    const firstEntry = register(registry, first);
+    const secondEntry = register(registry, second, {
+      leaseToken: "lease-token-example-00000002",
+      ownerSessionKey: "agent:main:discord:example-owner-2",
+      ownerRunId: "owner-run-example-2",
+      processHandle: "process-example-2",
+      jobId: "job-example-2",
+      destination: { channel: "discord", accountId: "account-example-2", conversationId: "2" },
+    });
+    await activate(registry, firstEntry);
+    await activate(registry, secondEntry);
+    const controller = new ReportController(registry);
+    const firstSession = "agent:main:cron:job-example-1:run:tick-1";
+    const secondSession = "agent:main:cron:job-example-2:run:tick-1";
+    await preparePublication(controller, firstEntry, firstSession);
+    await preparePublication(controller, secondEntry, secondSession);
+    assert.equal(controller.authorizeSending(first.message, {
+      sessionKey: firstSession, channelId: "discord", accountId: "account-example",
+      conversationId: "1",
+    }), "authorized");
+    assert.equal(controller.authorizeSending(second.message, {
+      sessionKey: secondSession, channelId: "discord", accountId: "account-example-2",
+      conversationId: "2",
+    }), "authorized");
+  });
+
   it("acknowledges one successful logical multipart send with its canonical message id", async () => {
     const f = fixture();
     const registry = new LeaseRegistry(f.state);
@@ -195,7 +308,7 @@ describe("controller caller and delivery binding", () => {
     await activate(registry, entry);
     const controller = new ReportController(registry);
     const sessionKey = "agent:main:cron:job-example-1:run:tick-1";
-    await controller.tick(entry, sessionKey);
+    await preparePublication(controller, entry, sessionKey);
     const context = { sessionKey, channelId: "discord", accountId: entry.destination.accountId,
       conversationId: entry.destination.conversationId };
     assert.equal(controller.authorizeSending(f.message, context), "authorized");
@@ -217,7 +330,7 @@ describe("controller caller and delivery binding", () => {
     await activate(registry, entry);
     const controller = new ReportController(registry);
     const sessionKey = "agent:main:cron:job-example-1:run:tick-1";
-    await controller.tick(entry, sessionKey);
+    await preparePublication(controller, entry, sessionKey);
     const context = { sessionKey, channelId: "discord", accountId: entry.destination.accountId,
       conversationId: entry.destination.conversationId };
     controller.authorizeSending(f.message, context);
@@ -225,8 +338,7 @@ describe("controller caller and delivery binding", () => {
     assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_missing" });
     const internals = controller as unknown as { pending: Map<string, { expiresAtMs: number }> };
     internals.pending.get(entry.leaseHash)!.expiresAtMs = 0;
-    assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_pending", message: f.message,
-      destination: entry.destination });
+    await preparePublication(controller, entry, sessionKey);
     controller.authorizeSending(f.message, context);
     (globalThis as Record<string, unknown>).__acpControllerAck = "throw";
     const messageId = (BigInt(Date.now() - 1420070400000) << 22n).toString();
@@ -244,8 +356,7 @@ describe("controller caller and delivery binding", () => {
       (globalThis as Record<string, unknown>).__acpControllerPumpStatus = terminal;
       const result = await new ReportController(registry).tick(entry,
         "agent:main:cron:job-example-1:run:tick-1");
-      assert.deepEqual(result, { status: terminal, cleanup: "remove_current_job_then_release_lease",
-        jobId: "job-example-1" });
+      assert.deepEqual(result, { status: terminal, cleanup: "remove_current_job_then_release_lease" });
       assert.equal(registry.getByToken("lease-token-example-00000001")?.cleanupState, terminal);
     });
   }
@@ -273,6 +384,36 @@ describe("receipt time and lifecycle enforcement", () => {
     const surfaces = createControllerSurfaces(api);
     const entry = register(surfaces.registry, f);
     await activate(surfaces.registry, entry);
+    const cronCtx = { toolName: "acp_report_controller", agentId: "main",
+      sessionKey: "agent:main:cron:job-example-1:run:tick-1" };
+    policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "tick-example",
+      params: { action: "tick" } }, cronCtx);
+    const tickResult = await toolFactory!(cronCtx).execute("tick-example", {
+      action: "tick", leaseToken: "lease-token-example-00000001",
+    });
+    assert.equal((tickResult.details as Record<string, unknown>).status, "delivery_pending");
+    assert.deepEqual(Object.keys(tickResult.details as Record<string, unknown>).sort(),
+      ["publicationToken", "status"]);
+    const serializedTick = JSON.stringify(tickResult);
+    assert.equal(serializedTick.includes(f.message), false);
+    assert.equal(serializedTick.includes(entry.destination.accountId), false);
+    const publicationToken = String((tickResult.details as Record<string, unknown>).publicationToken);
+    const injected = policy!.evaluate({ toolName: "message", params: {
+      action: "send", message: publicationToken, final: false,
+    } }, { ...cronCtx, toolName: "message" }) as { params?: Record<string, unknown> };
+    assert.equal(injected.params?.message, f.message);
+    assert.equal(injected.params?.target, entry.destination.conversationId);
+    assert.deepEqual(policy!.evaluate({ toolName: "message", params: {
+      action: "send", message: publicationToken, final: false,
+    } }, { ...cronCtx, toolName: "message" }),
+    { block: true, blockReason: ReasonCodes.ControllerScopeMismatch });
+    assert.deepEqual(policy!.evaluate({ toolName: "message", params: {
+      action: "send", message: f.message, final: false,
+    } }, { ...cronCtx, toolName: "message" }),
+    { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion });
+    assert.equal(surfaces.messageSending({ to: entry.destination.conversationId,
+      content: f.message }, { channelId: "discord", accountId: entry.destination.accountId,
+      conversationId: entry.destination.conversationId, sessionKey: cronCtx.sessionKey }), undefined);
     policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "call-example", params: { action: "status" } },
       { toolName: "acp_report_controller", agentId: "helper", sessionKey: "agent:helper:example", runId: "helper-run" });
     const tool = toolFactory!({ agentId: "helper", sessionKey: "agent:helper:example" });
@@ -291,6 +432,7 @@ describe("receipt time and lifecycle enforcement", () => {
     surfaces.agentEnd({ messages: [], success: true }, ctx);
     assert.ok(logs.some((line) => line.includes(ReasonCodes.LeaseAgentEndViolation)));
     assert.ok(logs.every((line) => !line.includes("example-owner") && !line.includes("owner-run")));
+    assert.ok(logs.every((line) => !line.includes(f.message)));
   });
 
   it("allows terminal recovery only to a fresh authenticated run in the same owner session", async () => {
@@ -319,7 +461,7 @@ describe("receipt time and lifecycle enforcement", () => {
       requester: { senderIsOwner: true } };
     const status = await invoke("fresh-status", freshOwner, "status");
     assert.deepEqual(status.details, { status: "terminal_acked",
-      cleanup: "remove_current_job_then_release_lease", jobId: "job-example-1" });
+      cleanup: "remove_current_job_then_release_lease" });
     assert.ok(toolFactory!(freshOwner).outputSchema, "the controller must declare its structured output contract");
 
     const wrongSession = await invoke("wrong-session", { ...freshOwner,
@@ -476,7 +618,7 @@ describe("receipt time and lifecycle enforcement", () => {
     const owner = { toolName: "acp_report_controller", agentId: "main",
       sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-2",
       requester: { senderIsOwner: true } };
-    const invokeAbort = async (id: string, ctx = owner) => {
+    const invokeAbort = async (id: string, ctx: Record<string, unknown> = owner) => {
       policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id,
         params: { action: "abort_preactivation" } }, ctx);
       return toolFactory!(ctx).execute(id, {
@@ -494,7 +636,9 @@ describe("receipt time and lifecycle enforcement", () => {
       assert.equal(entry.phase, "prepared");
     }
     (globalThis as Record<string, unknown>).__acpControllerAbort = "preactivation_exit";
-    const aborted = await invokeAbort("abort-safe");
+    const exactCron = { toolName: "acp_report_controller", agentId: "main",
+      sessionKey: "agent:main:cron:job-example-1:run:tick-recovery" };
+    const aborted = await invokeAbort("abort-safe", exactCron);
     assert.deepEqual(aborted.details, { status: "aborted" });
     assert.deepEqual((globalThis as Record<string, unknown>).__acpControllerAbortInput,
       { transportFile: f.transport, processHandle: "process-example-1" });

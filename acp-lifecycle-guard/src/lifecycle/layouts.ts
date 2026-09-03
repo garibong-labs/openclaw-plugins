@@ -89,10 +89,10 @@ const heading = (text: string): LineSpec => ({
   code: ReasonCodes.SectionHeadingDrift,
 });
 
-/** `🤖 **ACP**: <harness> · `<exact-model>`` */
+/** `🤖 **ACP**: (Claude Code|Codex) · `<exact-model>`` */
 const ACP_HARNESS_LINE: LineSpec = {
   kind: "pattern",
-  source: "^🤖 \\*\\*ACP\\*\\*: \\S.* · `[^`]+`$",
+  source: "^🤖 \\*\\*ACP\\*\\*: (?:Claude Code|Codex) · `[^`]+`$",
   code: ReasonCodes.MetadataLineDrift,
 };
 

@@ -49,24 +49,21 @@ describe("shipped report controller automation", () => {
       String(payload.script)));
   });
 
-  it("sends one returned message byte-for-byte to the returned exact route, then ticks once", async () => {
-    const exactMessage = "synthetic report\nwith exact bytes";
+  it("passes one opaque publication token to the message tool, then ticks once", async () => {
+    const publicationToken = "acp-pub-example-token-00000001";
     const calls = await evaluate([
-      { status: "delivery_pending", message: exactMessage,
-        destination: { channel: "discord", accountId: "account-example", conversationId: "1" } },
+      { status: "delivery_pending", publicationToken },
       { status: "none_due" },
     ]);
     assert.deepEqual(calls, [
       { tool: "acp_report_controller", params: { action: "tick", leaseToken: "LEASE_TOKEN" } },
-      { tool: "message", params: { action: "send", channel: "discord", target: "1",
-        accountId: "account-example", message: exactMessage, final: false } },
+      { tool: "message", params: { action: "send", message: publicationToken, final: false } },
       { tool: "acp_report_controller", params: { action: "tick", leaseToken: "LEASE_TOKEN" } },
     ]);
   });
 
   it("never sends a second time when the bounded post-send tick is still pending", async () => {
-    const pending = { status: "delivery_pending", message: "synthetic report",
-      destination: { channel: "discord", accountId: "account-example", conversationId: "1" } };
+    const pending = { status: "delivery_pending", publicationToken: "acp-pub-example-token-00000001" };
     const calls = await evaluate([pending, pending]);
     assert.equal(calls.filter((call) => call.tool === "message").length, 1);
     assert.equal(calls.filter((call) => call.tool === "acp_report_controller" &&
@@ -85,10 +82,9 @@ describe("shipped report controller automation", () => {
 
   for (const status of ["terminal_acked", "tracking_lost"] as const) {
     it(`removes only the authenticated current job before releasing for ${status}`, async () => {
-      assert.deepEqual(await evaluate([{ status, cleanup: "remove_current_job_then_release_lease",
-        jobId: "job-example-1" }]), [
+      assert.deepEqual(await evaluate([{ status, cleanup: "remove_current_job_then_release_lease" }]), [
         { tool: "acp_report_controller", params: { action: "tick", leaseToken: "LEASE_TOKEN" } },
-        { tool: "automations", params: { action: "remove", jobId: "job-example-1" } },
+        { tool: "automations", params: { action: "remove", jobId: "JOB_ID" } },
         { tool: "acp_report_controller", params: { action: "release", leaseToken: "LEASE_TOKEN" } },
       ]);
     });
@@ -96,9 +92,8 @@ describe("shipped report controller automation", () => {
 
   it("releases after a post-send terminal acknowledgement", async () => {
     const calls = await evaluate([
-      { status: "delivery_pending", message: "synthetic report",
-        destination: { channel: "discord", accountId: "account-example", conversationId: "1" } },
-      { status: "terminal_acked", cleanup: "remove_current_job_then_release_lease", jobId: "job-example-1" },
+      { status: "delivery_pending", publicationToken: "acp-pub-example-token-00000001" },
+      { status: "terminal_acked", cleanup: "remove_current_job_then_release_lease" },
     ]);
     assert.deepEqual(calls.map((call) => call.tool),
       ["acp_report_controller", "message", "acp_report_controller", "automations", "acp_report_controller"]);
@@ -109,10 +104,22 @@ describe("shipped report controller automation", () => {
     const run = new AsyncFunction("acp_report_controller", "message", "automations", String(payload.script));
     await assert.rejects(run(
       async (params) => { observed.push(String(params.action)); return { status: "terminal_acked",
-        cleanup: "remove_current_job_then_release_lease", jobId: "job-example-1" }; },
+        cleanup: "remove_current_job_then_release_lease" }; },
       async () => { observed.push("send"); },
       async () => { observed.push("remove"); throw new Error("synthetic removal failure"); },
     ), /synthetic removal failure/u);
     assert.deepEqual(observed, ["tick", "remove"]);
+  });
+
+  it("removes the exact current job only after transport-proven prepared recovery", async () => {
+    const calls = await evaluate([
+      { status: "error", code: "acp_lifecycle_guard.controller.lease_prepared" },
+      { status: "aborted" },
+    ]);
+    assert.deepEqual(calls, [
+      { tool: "acp_report_controller", params: { action: "tick", leaseToken: "LEASE_TOKEN" } },
+      { tool: "acp_report_controller", params: { action: "abort_preactivation", leaseToken: "LEASE_TOKEN" } },
+      { tool: "automations", params: { action: "remove", jobId: "JOB_ID" } },
+    ]);
   });
 });

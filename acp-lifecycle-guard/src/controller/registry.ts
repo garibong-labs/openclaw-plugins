@@ -7,6 +7,7 @@ export const CONTROLLER_SCHEMA_VERSION = "acp-report-controller.v2";
 const LEGACY_CONTROLLER_SCHEMA_VERSION = "acp-report-controller.v1";
 export const CONTROLLER_TOOL_NAME = "acp_report_controller";
 export const MAX_ACTIVE_LEASES = 64;
+export const MAX_PREPARED_LEASES_PER_OWNER = 4;
 
 const SAFE_OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$/u;
 const SAFE_HANDLE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
@@ -98,6 +99,14 @@ export function leaseHash(token: unknown): string {
  * use this directly, so a 4 MiB read plus SHA-256 is not paid again on every
  * tick and every `message_sent`.
  */
+export function assertPosixControllerPlatform(
+  getuid: NodeJS.Process["getuid"] | undefined,
+): void {
+  if (typeof getuid !== "function") {
+    fail("acp_lifecycle_guard.controller.posix_required");
+  }
+}
+
 function statOwnedRegularFile(
   candidate: string,
   options: { privateFile: boolean; basename?: string },
@@ -115,7 +124,8 @@ function statOwnedRegularFile(
     if (error instanceof Error && error.name === "AcpReportControllerError") throw error;
     fail("acp_lifecycle_guard.controller.path_unavailable");
   }
-  if (real !== path.resolve(candidate) || stat.uid !== process.getuid?.()) {
+  assertPosixControllerPlatform(process.getuid);
+  if (real !== path.resolve(candidate) || stat.uid !== process.getuid!()) {
     fail("acp_lifecycle_guard.controller.path_unsafe");
   }
   if ((stat.mode & 0o022) !== 0 || (options.privateFile && (stat.mode & 0o077) !== 0)) {
@@ -169,11 +179,8 @@ function validateDestination(value: LeaseDestination): LeaseDestination {
   return { ...value };
 }
 
-function validateAttestation(
+function validateAttestationShape(
   value: FileAttestation,
-  privateFile: boolean,
-  basename?: string,
-  requireStable = true,
 ): void {
   if (!value || typeof value !== "object" || typeof value.path !== "string" ||
       !Number.isSafeInteger(value.device) || value.device < 0 ||
@@ -182,6 +189,15 @@ function validateAttestation(
       !Number.isFinite(value.modifiedMs) || !SHA256.test(value.sha256)) {
     fail("acp_lifecycle_guard.controller.registry_invalid");
   }
+}
+
+function validateAttestation(
+  value: FileAttestation,
+  privateFile: boolean,
+  basename?: string,
+  requireStable = true,
+): void {
+  validateAttestationShape(value);
   const options = { privateFile, ...(basename === undefined ? {} : { basename }) };
   if (!requireStable) {
     // Identity-only check: hashing a deliberately mutable record would only
@@ -194,7 +210,7 @@ function validateAttestation(
   }
 }
 
-function validateEntry(entry: ControllerLease): ControllerLease {
+function validateEntryShape(entry: ControllerLease): ControllerLease {
   if (!SHA256.test(entry.leaseHash) || entry.ownerAgentId !== "main" ||
       !MAIN_SESSION.test(entry.ownerSessionKey) || !SAFE_HANDLE.test(entry.ownerRunId) ||
       !SAFE_HANDLE.test(entry.processHandle) || !SAFE_JOB.test(entry.jobId) ||
@@ -205,6 +221,18 @@ function validateEntry(entry: ControllerLease): ControllerLease {
     fail("acp_lifecycle_guard.controller.registry_invalid");
   }
   validateDestination(entry.destination);
+  validateAttestationShape(entry.transportFile);
+  validateAttestationShape(entry.reportPumpEntry);
+  validateAttestationShape(entry.hostTransportEntry);
+  if (entry.snapshotFile !== undefined) validateAttestationShape(entry.snapshotFile);
+  if (path.dirname(entry.reportPumpEntry.path) !== path.dirname(entry.hostTransportEntry.path)) {
+    fail("acp_lifecycle_guard.controller.registry_invalid");
+  }
+  return entry;
+}
+
+function validateEntry(entry: ControllerLease): ControllerLease {
+  validateEntryShape(entry);
   // The transport record is mutable and the skills transport replaces it
   // atomically. Its exact absolute path and private-file boundary remain
   // fixed, while inode, size, timestamp, and digest are expected to evolve.
@@ -224,6 +252,7 @@ export class LeaseRegistry {
   private entries = new Map<string, ControllerLease>();
 
   constructor(stateDir: string) {
+    assertPosixControllerPlatform(process.getuid);
     this.directory = path.join(stateDir, "plugins", "acp-lifecycle-guard");
     this.file = path.join(this.directory, "active-leases.json");
     this.load();
@@ -232,7 +261,7 @@ export class LeaseRegistry {
   private ensureDirectory(): void {
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     const stat = fs.lstatSync(this.directory);
-    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== process.getuid?.() ||
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== process.getuid!() ||
         (stat.mode & 0o077) !== 0) {
       fail("acp_lifecycle_guard.controller.registry_permissions");
     }
@@ -242,7 +271,7 @@ export class LeaseRegistry {
     this.ensureDirectory();
     if (!fs.existsSync(this.file)) return;
     const stat = fs.lstatSync(this.file);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.uid !== process.getuid?.() ||
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.uid !== process.getuid!() ||
         (stat.mode & 0o077) !== 0 || stat.size > 262144) {
       fail("acp_lifecycle_guard.controller.registry_permissions");
     }
@@ -268,7 +297,12 @@ export class LeaseRegistry {
             cleanupState: (raw as { cleanupState: unknown }).cleanupState === "active"
               ? null : (raw as { cleanupState: unknown }).cleanupState }
         : raw;
-      const entry = validateEntry(candidate as ControllerLease);
+      // Startup validates only the bounded persisted shape. Path identity,
+      // ownership, permissions, and content attestations are deliberately
+      // deferred to the exact action that would import, mutate, publish, or
+      // acknowledge. A single moved stale transport therefore cannot disable
+      // unrelated registrations or trigger a startup hashing storm.
+      const entry = validateEntryShape(candidate as ControllerLease);
       if (this.entries.has(entry.leaseHash)) fail("acp_lifecycle_guard.controller.registry_invalid");
       this.entries.set(entry.leaseHash, entry);
     }
@@ -279,7 +313,11 @@ export class LeaseRegistry {
     const temporary = path.join(this.directory, `.active-leases.${process.pid}.${crypto.randomUUID()}.tmp`);
     const document: RegistryDocument = {
       schemaVersion: CONTROLLER_SCHEMA_VERSION,
-      leases: [...this.entries.values()],
+      // Keep the durable recovery queue oldest-first. Timestamps never delete
+      // entries; they only make explicit evidence-based prepared recovery and
+      // capacity diagnosis deterministic across restarts.
+      leases: [...this.entries.values()].sort((left, right) =>
+        Date.parse(left.registeredAt) - Date.parse(right.registeredAt)),
     };
     let fd: number | undefined;
     try {
@@ -303,6 +341,15 @@ export class LeaseRegistry {
     if (!MAIN_SESSION.test(input.ownerSessionKey) || !SAFE_HANDLE.test(input.ownerRunId) ||
         !SAFE_HANDLE.test(input.processHandle) || !SAFE_JOB.test(input.jobId)) {
       fail("acp_lifecycle_guard.controller.identity_invalid");
+    }
+    const preparedForOwner = [...this.entries.values()]
+      .filter((entry) => entry.phase === "prepared" && entry.ownerSessionKey === input.ownerSessionKey)
+      .sort((left, right) => Date.parse(left.registeredAt) - Date.parse(right.registeredAt));
+    if (preparedForOwner.length >= MAX_PREPARED_LEASES_PER_OWNER) {
+      // Never delete by age alone: the oldest timestamp only makes the cap
+      // deterministic. Recovery still requires abortPreactivation's attested
+      // transport proof under exact owner/job authority.
+      fail("acp_lifecycle_guard.controller.prepared_recovery_required");
     }
     if (this.entries.size >= MAX_ACTIVE_LEASES) fail("acp_lifecycle_guard.controller.registry_full");
     const transportFile = assertOwnedRegularFile(input.transportFile, { privateFile: true });
@@ -357,8 +404,15 @@ export class LeaseRegistry {
       entry.ownerSessionKey === sessionKey && entry.ownerRunId === runId);
   }
 
+  leasesForCron(agentId: string | undefined, sessionKey: string | undefined): ControllerLease[] {
+    const jobId = exactCronJob(sessionKey);
+    if (agentId !== "main" || jobId === undefined) return [];
+    return [...this.entries.values()].filter((entry) => entry.jobId === jobId);
+  }
+
   setCleanupState(entry: ControllerLease, state: Exclude<ControllerLease["cleanupState"], null>): void {
     if (entry.phase !== "active") fail("acp_lifecycle_guard.controller.phase_invalid");
+    this.revalidate(entry);
     const previous = entry.cleanupState;
     entry.cleanupState = state;
     // Every mutating path rolls the in-memory entry back on a failed write, so
@@ -424,6 +478,7 @@ export class LeaseRegistry {
   }
 
   release(entry: ControllerLease): void {
+    this.revalidate(entry);
     this.entries.delete(entry.leaseHash);
     try { this.persist(); } catch (error) { this.entries.set(entry.leaseHash, entry); throw error; }
   }
@@ -452,12 +507,15 @@ type PendingDelivery = {
   leaseHash: string;
   cronSessionKey: string;
   messageDigest: string;
+  publicationTokenHash: string;
+  message: string;
   report: Record<string, unknown>;
   reportId: string;
   reportKind: "intermediate" | "terminal";
   cadence: number;
   attemptId: string;
   fence: number;
+  injected: boolean;
   authorized: boolean;
   expiresAtMs: number;
   outcome: "delivery_missing" | "delivery_uncertain";
@@ -465,14 +523,25 @@ type PendingDelivery = {
 
 export type ControllerTickResult =
   | { status: "none_due" }
-  | { status: "delivery_pending"; message: string; destination: LeaseDestination }
-  | { status: "terminal_acked" | "tracking_lost"; cleanup: "remove_current_job_then_release_lease"; jobId: string }
+  | { status: "delivery_pending"; publicationToken: string }
+  | { status: "terminal_acked" | "tracking_lost"; cleanup: "remove_current_job_then_release_lease" }
   | { status: "delivery_missing" | "delivery_uncertain" };
 
 function exactCronJob(sessionKey: string | undefined): string | undefined {
   if (!sessionKey) return undefined;
   const match = /^(?:agent:main:)?cron:([^:]+)(?::run:[^:]+)?$/u.exec(sessionKey);
   return match?.[1];
+}
+
+function pendingScopeMatches(
+  pending: PendingDelivery,
+  entry: ControllerLease,
+  context: { sessionKey?: string; channelId: string; accountId?: string; conversationId?: string },
+): boolean {
+  return pending.cronSessionKey === context.sessionKey &&
+    entry.destination.channel === context.channelId &&
+    entry.destination.accountId === context.accountId &&
+    entry.destination.conversationId === context.conversationId;
 }
 
 function parseCanonicalReport(message: string): Record<string, unknown> {
@@ -547,7 +616,7 @@ export class ReportController {
       fail("acp_lifecycle_guard.controller.lease_prepared");
     }
     if (entry.cleanupState !== null) {
-      return { status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease", jobId: entry.jobId };
+      return { status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease" };
     }
     const existing = this.pending.get(entry.leaseHash);
     if (existing !== undefined && Date.now() < existing.expiresAtMs) {
@@ -576,7 +645,7 @@ export class ReportController {
     const status = result.status;
     if (status === "terminal_acked" || status === "tracking_lost") {
       this.registry.setCleanupState(entry, status);
-      return { status, cleanup: "remove_current_job_then_release_lease", jobId: entry.jobId };
+      return { status, cleanup: "remove_current_job_then_release_lease" };
     }
     if (status === "none_due") return { status };
     if (status !== "delivery_pending" || typeof result.message !== "string" ||
@@ -587,32 +656,82 @@ export class ReportController {
         (result.reportKind !== "intermediate" && result.reportKind !== "terminal")) {
       fail("acp_lifecycle_guard.controller.pump_result_invalid");
     }
+    const publicationToken = `acp-pub-${crypto.randomUUID().replaceAll("-", "")}`;
     this.pending.set(entry.leaseHash, {
       leaseHash: entry.leaseHash, cronSessionKey: sessionKey,
-      messageDigest: result.messageDigest, report: parseCanonicalReport(result.message),
+      messageDigest: result.messageDigest,
+      publicationTokenHash: leaseHash(publicationToken),
+      message: result.message,
+      report: parseCanonicalReport(result.message),
       reportId: result.reportId, reportKind: result.reportKind,
       cadence: result.cadence as number, attemptId: result.attemptId,
-      fence: result.fence as number, authorized: false,
+      fence: result.fence as number, injected: false, authorized: false,
       expiresAtMs: claimedAtMs + (transport.REPORT_ATTEMPT_TTL_MS as number),
       outcome: "delivery_uncertain",
     });
-    return { status: "delivery_pending", message: result.message, destination: { ...entry.destination } };
+    return { status: "delivery_pending", publicationToken };
+  }
+
+  prepareMessageTool(
+    params: Record<string, unknown>,
+    context: { agentId?: string; sessionKey?: string },
+  ): { outcome: "unrelated" | "authorized" | "ambiguous" | "scope_mismatch"; params?: Record<string, unknown> } {
+    this.prunePending();
+    if (params.action !== "send" || typeof params.message !== "string") {
+      return { outcome: "unrelated" };
+    }
+    let tokenHash: string;
+    try { tokenHash = leaseHash(params.message); } catch { return { outcome: "unrelated" }; }
+    const tokenCandidates = [...this.pending.values()].filter((candidate) =>
+      candidate.publicationTokenHash === tokenHash);
+    if (tokenCandidates.length === 0) return { outcome: "unrelated" };
+    const scoped = tokenCandidates.filter((candidate) => {
+      const entry = this.registry.getByHash(candidate.leaseHash);
+      return entry !== undefined && context.agentId === "main" &&
+        candidate.cronSessionKey === context.sessionKey &&
+        exactCronJob(context.sessionKey) === entry.jobId;
+    });
+    if (scoped.length === 0) return { outcome: "scope_mismatch" };
+    if (scoped.length !== 1) return { outcome: "ambiguous" };
+    const pending = scoped[0]!;
+    if (pending.injected || Object.keys(params).some((key) =>
+      !["action", "message", "final"].includes(key)) || params.final !== false) {
+      return { outcome: "scope_mismatch" };
+    }
+    const entry = this.registry.getByHash(pending.leaseHash)!;
+    this.registry.revalidate(entry);
+    pending.injected = true;
+    return {
+      outcome: "authorized",
+      params: {
+        action: "send",
+        channel: entry.destination.channel,
+        target: entry.destination.conversationId,
+        accountId: entry.destination.accountId,
+        message: pending.message,
+        final: false,
+      },
+    };
   }
 
   authorizeSending(content: string, context: { sessionKey?: string; channelId: string; accountId?: string; conversationId?: string }):
     "unrelated" | "authorized" | "ambiguous" | "scope_mismatch" {
     this.prunePending();
     const digest = crypto.createHash("sha256").update(content, "utf8").digest("hex");
-    const candidates = [...this.pending.values()].filter((candidate) => candidate.messageDigest === digest);
-    if (candidates.length === 0) return "unrelated";
-    if (candidates.length !== 1) return "ambiguous";
-    const matches = candidates.filter((candidate) => {
+    const digestCandidates = [...this.pending.values()].filter((candidate) => candidate.messageDigest === digest);
+    if (digestCandidates.length === 0) return "unrelated";
+    const matches = digestCandidates.filter((candidate) => {
       const entry = this.registry.getByHash(candidate.leaseHash);
       return entry !== undefined && candidate.cronSessionKey === context.sessionKey &&
         entry.destination.channel === context.channelId && entry.destination.accountId === context.accountId &&
         entry.destination.conversationId === context.conversationId;
     });
-    if (matches.length !== 1) return "scope_mismatch";
+    if (matches.length === 0) return "scope_mismatch";
+    if (matches.length !== 1) return "ambiguous";
+    if (!matches[0]!.injected) return "scope_mismatch";
+    const entry = this.registry.getByHash(matches[0]!.leaseHash);
+    if (entry === undefined) return "scope_mismatch";
+    this.registry.revalidate(entry);
     matches[0]!.authorized = true;
     return "authorized";
   }
@@ -621,14 +740,17 @@ export class ReportController {
     context: { sessionKey?: string; channelId: string; accountId?: string; conversationId?: string }): Promise<"unrelated" | "ignored" | "acked" | "failed"> {
     this.prunePending();
     const digest = crypto.createHash("sha256").update(event.content, "utf8").digest("hex");
-    const candidates = [...this.pending.values()].filter((candidate) => candidate.messageDigest === digest && candidate.authorized);
-    if (candidates.length !== 1) return candidates.length === 0 ? "unrelated" : "ignored";
+    const digestCandidates = [...this.pending.values()].filter((candidate) =>
+      candidate.messageDigest === digest && candidate.authorized);
+    if (digestCandidates.length === 0) return "unrelated";
+    const candidates = digestCandidates.filter((candidate) => {
+      const entry = this.registry.getByHash(candidate.leaseHash);
+      return entry !== undefined && pendingScopeMatches(candidate, entry, context);
+    });
+    if (candidates.length !== 1) return "ignored";
     const pending = candidates[0]!;
     const entry = this.registry.getByHash(pending.leaseHash);
-    if (!entry || pending.cronSessionKey !== context.sessionKey || entry.destination.channel !== context.channelId ||
-        entry.destination.accountId !== context.accountId || entry.destination.conversationId !== context.conversationId) {
-      return "ignored";
-    }
+    if (!entry) return "ignored";
     if (!event.success) {
       pending.outcome = event.messageId === undefined ? "delivery_missing" : "delivery_uncertain";
       return "ignored";
