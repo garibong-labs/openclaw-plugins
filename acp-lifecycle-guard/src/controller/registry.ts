@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const CONTROLLER_SCHEMA_VERSION = "acp-report-controller.v1";
+export const CONTROLLER_SCHEMA_VERSION = "acp-report-controller.v2";
+const LEGACY_CONTROLLER_SCHEMA_VERSION = "acp-report-controller.v1";
 export const CONTROLLER_TOOL_NAME = "acp_report_controller";
 export const MAX_ACTIVE_LEASES = 64;
 
@@ -30,7 +31,7 @@ export type FileAttestation = {
   sha256: string;
 };
 
-export type ActiveLease = {
+export type ControllerLease = {
   leaseHash: string;
   ownerAgentId: "main";
   ownerSessionKey: string;
@@ -43,12 +44,16 @@ export type ActiveLease = {
   hostTransportEntry: FileAttestation;
   snapshotFile?: FileAttestation;
   registeredAt: string;
-  cleanupState: "active" | "terminal_acked" | "tracking_lost";
+  phase: "prepared" | "active";
+  cleanupState: null | "terminal_acked" | "tracking_lost";
 };
 
+/** @deprecated Kept as a source-compatible alias for controller consumers. */
+export type ActiveLease = ControllerLease;
+
 type RegistryDocument = {
-  schemaVersion: typeof CONTROLLER_SCHEMA_VERSION;
-  leases: ActiveLease[];
+  schemaVersion: typeof CONTROLLER_SCHEMA_VERSION | typeof LEGACY_CONTROLLER_SCHEMA_VERSION;
+  leases: unknown[];
 };
 
 export type RegisterLeaseInput = {
@@ -155,11 +160,13 @@ function validateAttestation(
   }
 }
 
-function validateEntry(entry: ActiveLease): ActiveLease {
+function validateEntry(entry: ControllerLease): ControllerLease {
   if (!SHA256.test(entry.leaseHash) || entry.ownerAgentId !== "main" ||
       !MAIN_SESSION.test(entry.ownerSessionKey) || !SAFE_HANDLE.test(entry.ownerRunId) ||
       !SAFE_HANDLE.test(entry.processHandle) || !SAFE_JOB.test(entry.jobId) ||
-      !["active", "terminal_acked", "tracking_lost"].includes(entry.cleanupState) ||
+      !["prepared", "active"].includes(entry.phase) ||
+      ![null, "terminal_acked", "tracking_lost"].includes(entry.cleanupState) ||
+      (entry.phase === "prepared" && entry.cleanupState !== null) ||
       !Number.isFinite(Date.parse(entry.registeredAt))) {
     fail("acp_lifecycle_guard.controller.registry_invalid");
   }
@@ -180,7 +187,7 @@ function validateEntry(entry: ActiveLease): ActiveLease {
 export class LeaseRegistry {
   readonly directory: string;
   readonly file: string;
-  private entries = new Map<string, ActiveLease>();
+  private entries = new Map<string, ControllerLease>();
 
   constructor(stateDir: string) {
     this.directory = path.join(stateDir, "plugins", "acp-lifecycle-guard");
@@ -212,13 +219,22 @@ export class LeaseRegistry {
       fail("acp_lifecycle_guard.controller.registry_invalid");
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
-        (parsed as RegistryDocument).schemaVersion !== CONTROLLER_SCHEMA_VERSION ||
+        ![CONTROLLER_SCHEMA_VERSION, LEGACY_CONTROLLER_SCHEMA_VERSION].includes(
+          (parsed as RegistryDocument).schemaVersion,
+        ) ||
         !Array.isArray((parsed as RegistryDocument).leases) ||
         (parsed as RegistryDocument).leases.length > MAX_ACTIVE_LEASES) {
       fail("acp_lifecycle_guard.controller.registry_invalid");
     }
     for (const raw of (parsed as RegistryDocument).leases) {
-      const entry = validateEntry(raw);
+      const legacy = (parsed as RegistryDocument).schemaVersion === LEGACY_CONTROLLER_SCHEMA_VERSION;
+      const candidate = legacy && raw && typeof raw === "object" &&
+        (raw as { cleanupState?: unknown }).cleanupState !== undefined
+        ? { ...(raw as Record<string, unknown>), phase: "active",
+            cleanupState: (raw as { cleanupState: unknown }).cleanupState === "active"
+              ? null : (raw as { cleanupState: unknown }).cleanupState }
+        : raw;
+      const entry = validateEntry(candidate as ControllerLease);
       if (this.entries.has(entry.leaseHash)) fail("acp_lifecycle_guard.controller.registry_invalid");
       this.entries.set(entry.leaseHash, entry);
     }
@@ -248,7 +264,7 @@ export class LeaseRegistry {
     }
   }
 
-  register(input: RegisterLeaseInput): ActiveLease {
+  register(input: RegisterLeaseInput): ControllerLease {
     const hash = leaseHash(input.leaseToken);
     if (!MAIN_SESSION.test(input.ownerSessionKey) || !SAFE_HANDLE.test(input.ownerRunId) ||
         !SAFE_HANDLE.test(input.processHandle) || !SAFE_JOB.test(input.jobId)) {
@@ -272,7 +288,7 @@ export class LeaseRegistry {
       (entry.ownerSessionKey === input.ownerSessionKey && entry.ownerRunId === input.ownerRunId))) {
       fail("acp_lifecycle_guard.controller.duplicate");
     }
-    const entry: ActiveLease = {
+    const entry: ControllerLease = {
       leaseHash: hash,
       ownerAgentId: "main",
       ownerSessionKey: input.ownerSessionKey,
@@ -285,38 +301,99 @@ export class LeaseRegistry {
       hostTransportEntry,
       ...(snapshotFile === undefined ? {} : { snapshotFile }),
       registeredAt: new Date().toISOString(),
-      cleanupState: "active",
+      phase: "prepared",
+      cleanupState: null,
     };
     this.entries.set(hash, entry);
     try { this.persist(); } catch (error) { this.entries.delete(hash); throw error; }
     return entry;
   }
 
-  getByToken(token: unknown): ActiveLease | undefined {
+  getByToken(token: unknown): ControllerLease | undefined {
     return this.entries.get(leaseHash(token));
   }
 
-  getByHash(hash: string): ActiveLease | undefined {
+  getByHash(hash: string): ControllerLease | undefined {
     return this.entries.get(hash);
   }
 
-  activeForOwner(sessionKey: string | undefined, runId: string | undefined): ActiveLease[] {
+  leasesForOwner(sessionKey: string | undefined, runId: string | undefined): ControllerLease[] {
     if (!sessionKey || !runId) return [];
     return [...this.entries.values()].filter((entry) =>
       entry.ownerSessionKey === sessionKey && entry.ownerRunId === runId);
   }
 
-  setCleanupState(entry: ActiveLease, state: ActiveLease["cleanupState"]): void {
+  setCleanupState(entry: ControllerLease, state: Exclude<ControllerLease["cleanupState"], null>): void {
+    if (entry.phase !== "active") fail("acp_lifecycle_guard.controller.phase_invalid");
     entry.cleanupState = state;
     this.persist();
   }
 
-  release(entry: ActiveLease): void {
+  async commitActivation(entry: ControllerLease): Promise<void> {
+    if (entry.phase === "active") return;
+    this.revalidate(entry);
+    const transport = await import(
+      `${pathToFileURL(entry.hostTransportEntry.path).href}?attested=${entry.hostTransportEntry.sha256}`
+    ) as { confirmHostTransportActivation?: (input: Record<string, unknown>) => unknown };
+    if (typeof transport.confirmHostTransportActivation !== "function") {
+      fail("acp_lifecycle_guard.controller.activation_contract_invalid");
+    }
+    let evidence: unknown;
+    try {
+      evidence = await transport.confirmHostTransportActivation({
+        transportFile: entry.transportFile.path,
+        processHandle: entry.processHandle,
+      });
+    } catch {
+      fail("acp_lifecycle_guard.controller.activation_not_confirmed");
+    }
+    if (!evidence || typeof evidence !== "object" || Array.isArray(evidence) ||
+        Object.keys(evidence).sort().join(",") !== "processHandle,schemaVersion,type" ||
+        (evidence as Record<string, unknown>).schemaVersion !== "acp-host-controller-lease.v1" ||
+        (evidence as Record<string, unknown>).type !== "host_transport_activation_confirmed" ||
+        (evidence as Record<string, unknown>).processHandle !== entry.processHandle) {
+      fail("acp_lifecycle_guard.controller.activation_evidence_invalid");
+    }
+    entry.phase = "active";
+    try { this.persist(); } catch (error) { entry.phase = "prepared"; throw error; }
+  }
+
+  async abortPreactivation(entry: ControllerLease): Promise<void> {
+    if (entry.phase !== "prepared" || entry.cleanupState !== null) {
+      fail("acp_lifecycle_guard.controller.preactivation_abort_denied");
+    }
+    this.revalidate(entry);
+    const transport = await import(
+      `${pathToFileURL(entry.hostTransportEntry.path).href}?attested=${entry.hostTransportEntry.sha256}`
+    ) as { abortHostTransportPreactivation?: (input: Record<string, unknown>) => unknown };
+    if (typeof transport.abortHostTransportPreactivation !== "function") {
+      fail("acp_lifecycle_guard.controller.preactivation_contract_invalid");
+    }
+    let evidence: unknown;
+    try {
+      evidence = await transport.abortHostTransportPreactivation({
+        transportFile: entry.transportFile.path,
+        processHandle: entry.processHandle,
+      });
+    } catch {
+      fail("acp_lifecycle_guard.controller.preactivation_abort_denied");
+    }
+    if (!evidence || typeof evidence !== "object" || Array.isArray(evidence) ||
+        Object.keys(evidence).sort().join(",") !== "processHandle,schemaVersion,type" ||
+        (evidence as Record<string, unknown>).schemaVersion !== "acp-host-controller-lease.v1" ||
+        (evidence as Record<string, unknown>).type !== "host_transport_preactivation_aborted" ||
+        (evidence as Record<string, unknown>).processHandle !== entry.processHandle) {
+      fail("acp_lifecycle_guard.controller.preactivation_evidence_invalid");
+    }
+    this.release(entry);
+  }
+
+  release(entry: ControllerLease): void {
     this.entries.delete(entry.leaseHash);
     try { this.persist(); } catch (error) { this.entries.set(entry.leaseHash, entry); throw error; }
   }
 
-  revalidate(entry: ActiveLease): void {
+  revalidate(entry: ControllerLease): void {
     const mutableTransport = assertOwnedRegularFile(entry.transportFile.path, { privateFile: true });
     if (mutableTransport.path !== entry.transportFile.path) {
       fail("acp_lifecycle_guard.controller.trust_changed");
@@ -407,7 +484,10 @@ export class ReportController {
 
   async tick(entry: ActiveLease, sessionKey: string): Promise<ControllerTickResult> {
     this.registry.revalidate(entry);
-    if (entry.cleanupState !== "active") {
+    if (entry.phase !== "active") {
+      fail("acp_lifecycle_guard.controller.lease_prepared");
+    }
+    if (entry.cleanupState !== null) {
       return { status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease", jobId: entry.jobId };
     }
     const existing = this.pending.get(entry.leaseHash);

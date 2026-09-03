@@ -456,6 +456,11 @@ async function main(): Promise<void> {
     assert.equal(controllerTool.name, "acp_report_controller");
     assert.ok(controllerTool.outputSchema,
       "the installed 2026.8.1 tool catalog requires a declared details schema for deterministic script field use");
+    const controllerParameters = controllerTool.parameters as { oneOf: Array<{
+      properties: { action: { const: string } } }> };
+    assert.deepEqual(controllerParameters.oneOf.map((schema) => schema.properties.action.const),
+      ["register", "commit_activation", "abort_preactivation", "status", "tick", "release"],
+      "the installed 2026.8.1 tool catalog exposes the closed prepared-to-active action inventory");
 
     const automationTemplate = JSON.parse(readFileSync(path.join(PLUGIN_ROOT,
       "templates", "report-controller-automation.json"), "utf8")) as Record<string, unknown>;

@@ -24,7 +24,7 @@ import {
 
 const POLICY_ID = "acp-report-controller-lifecycle-v1";
 const FINALIZE_INSTRUCTION =
-  "An active ACP lifecycle lease still owns completion. Continue the turn; only the registered report automation may publish and acknowledge reports.";
+  "A prepared or active ACP lifecycle lease still owns completion. Continue the turn; only the registered report automation may publish and acknowledge reports.";
 
 type Admission = {
   agentId?: string;
@@ -40,6 +40,12 @@ function object(value: unknown): Record<string, unknown> {
 
 function string(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function exactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key)) &&
+    keys.every((key) => required.includes(key) || optional.includes(key));
 }
 
 function toolResult(value: Record<string, unknown>): Record<string, unknown> {
@@ -58,7 +64,9 @@ function isOwnerSession(entry: ActiveLease, admission: Admission): boolean {
 const CONTROLLER_OUTPUT_SCHEMA = {
   oneOf: [
     { type: "object", additionalProperties: false, required: ["status"],
-      properties: { status: { const: "registered" } } },
+      properties: { status: { const: "prepared" } } },
+    { type: "object", additionalProperties: false, required: ["status"],
+      properties: { status: { const: "aborted" } } },
     { type: "object", additionalProperties: false, required: ["status"],
       properties: { status: { const: "released" } } },
     { type: "object", additionalProperties: false, required: ["status"],
@@ -80,6 +88,31 @@ const CONTROLLER_OUTPUT_SCHEMA = {
       } },
     { type: "object", additionalProperties: false, required: ["status", "code"],
       properties: { status: { const: "error" }, code: { type: "string" } } },
+  ],
+} as const;
+
+const LEASE_TOKEN_SCHEMA = { type: "string", minLength: 16, maxLength: 128 } as const;
+const SIMPLE_ACTION_SCHEMAS = ["commit_activation", "abort_preactivation", "status", "tick", "release"]
+  .map((action) => ({ type: "object", additionalProperties: false,
+    required: ["action", "leaseToken"], properties: {
+      action: { const: action }, leaseToken: LEASE_TOKEN_SCHEMA,
+    } })) as unknown as readonly Record<string, unknown>[];
+const CONTROLLER_INPUT_SCHEMA = {
+  oneOf: [
+    { type: "object", additionalProperties: false,
+      required: ["action", "leaseToken", "transportFile", "processHandle", "jobId", "destination",
+        "reportPumpEntry", "hostTransportEntry"],
+      properties: {
+        action: { const: "register" }, leaseToken: LEASE_TOKEN_SCHEMA,
+        transportFile: { type: "string" }, processHandle: { type: "string" }, jobId: { type: "string" },
+        destination: { type: "object", additionalProperties: false,
+          required: ["channel", "accountId", "conversationId"], properties: {
+            channel: { const: "discord" }, accountId: { type: "string" }, conversationId: { type: "string" },
+          } },
+        reportPumpEntry: { type: "string" }, hostTransportEntry: { type: "string" },
+        snapshotFile: { type: "string" },
+      } },
+    ...SIMPLE_ACTION_SCHEMAS,
   ],
 } as const;
 
@@ -114,8 +147,8 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
         });
         return;
       }
-      const active = registry.activeForOwner(ctx.sessionKey, ctx.runId);
-      if (active.length === 0) return;
+      const leases = registry.leasesForOwner(ctx.sessionKey, ctx.runId);
+      if (leases.length === 0) return;
       if (event.toolName === "message" && event.params.final === false) return;
       log(api, "trusted_tool_policy", "blocked", ReasonCodes.LeaseEarlyCompletion);
       return { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion };
@@ -127,19 +160,7 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
     label: "ACP report controller",
     hideFromChannelProgress: true,
     description: "Operate one registered ACP report lifecycle lease. Automation ticks need only the opaque lease token.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      required: ["action", "leaseToken"],
-      properties: {
-        action: { type: "string", enum: ["register", "status", "tick", "release"] },
-        leaseToken: { type: "string", minLength: 16, maxLength: 128 },
-        transportFile: { type: "string" }, processHandle: { type: "string" },
-        jobId: { type: "string" }, destination: { type: "object" },
-        reportPumpEntry: { type: "string" }, hostTransportEntry: { type: "string" },
-        snapshotFile: { type: "string" },
-      },
-    },
+    parameters: CONTROLLER_INPUT_SCHEMA,
     outputSchema: CONTROLLER_OUTPUT_SCHEMA,
     async execute(toolCallId: string, raw: unknown): Promise<Record<string, unknown>> {
       const admission = admissions.get(toolCallId);
@@ -151,6 +172,20 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           throw new Error(ReasonCodes.ControllerCallerInvalid);
         }
         const action = string(params.action);
+        const simpleAction = ["commit_activation", "abort_preactivation", "status", "tick", "release"]
+          .includes(action);
+        if (action === "register") {
+          if (!exactKeys(params, ["action", "leaseToken", "transportFile", "processHandle", "jobId",
+            "destination", "reportPumpEntry", "hostTransportEntry"], ["snapshotFile"])) {
+            throw new Error(ReasonCodes.ControllerInputInvalid);
+          }
+        } else if (simpleAction) {
+          if (!exactKeys(params, ["action", "leaseToken"])) {
+            throw new Error(ReasonCodes.ControllerInputInvalid);
+          }
+        } else {
+          throw new Error(ReasonCodes.ControllerActionInvalid);
+        }
         const entry = action === "register" ? undefined : registry.getByToken(params.leaseToken);
         if (action === "register") {
           if (admission.agentId !== "main" || !admission.owner || !admission.sessionKey || !admission.runId ||
@@ -163,19 +198,29 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
             processHandle: string(params.processHandle), jobId: string(params.jobId), destination,
             reportPumpEntry: string(params.reportPumpEntry), hostTransportEntry: string(params.hostTransportEntry),
             ...(params.snapshotFile === undefined ? {} : { snapshotFile: string(params.snapshotFile) }) });
-          return toolResult({ status: "registered" });
+          return toolResult({ status: "prepared" });
         }
         if (!entry) throw new Error(ReasonCodes.ControllerLeaseNotFound);
         const cron = controller.callerMatchesCron(entry, admission.agentId, admission.sessionKey);
         const ownerSession = isOwnerSession(entry, admission);
+        if (action === "commit_activation") {
+          if (!ownerSession) throw new Error(ReasonCodes.ControllerCallerInvalid);
+          await registry.commitActivation(entry);
+          return toolResult({ status: "active" });
+        }
+        if (action === "abort_preactivation") {
+          if (!ownerSession) throw new Error(ReasonCodes.ControllerPreactivationAbortDenied);
+          await registry.abortPreactivation(entry);
+          return toolResult({ status: "aborted" });
+        }
         if (action === "status") {
           if (!ownerSession && !cron) throw new Error(ReasonCodes.ControllerCallerInvalid);
-          return toolResult(entry.cleanupState === "active" ? { status: "active" } : {
+          return toolResult(entry.cleanupState === null ? { status: entry.phase } : {
             status: entry.cleanupState, cleanup: "remove_current_job_then_release_lease", jobId: entry.jobId,
           });
         }
         if (action === "release") {
-          if (entry.cleanupState === "active" || (!ownerSession && !cron)) {
+          if (entry.phase !== "active" || entry.cleanupState === null || (!ownerSession && !cron)) {
             throw new Error(ReasonCodes.ControllerReleaseDenied);
           }
           registry.release(entry);
@@ -210,15 +255,15 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
       if (outcome === "failed") log(api, "message_sent", "retained", ReasonCodes.ControllerAckFailed);
     },
     beforeAgentFinalize(event, ctx) {
-      const active = registry.activeForOwner(ctx.sessionKey ?? event.sessionKey, ctx.runId ?? event.runId);
-      if (active.length === 0) return;
+      const leases = registry.leasesForOwner(ctx.sessionKey ?? event.sessionKey, ctx.runId ?? event.runId);
+      if (leases.length === 0) return;
       log(api, "before_agent_finalize", "revise", ReasonCodes.LeaseFinalizeBlocked);
       return { action: "revise", reason: ReasonCodes.LeaseFinalizeBlocked,
         retry: { instruction: FINALIZE_INSTRUCTION,
           idempotencyKey: "acp_lifecycle_guard.active_lease_v1", maxAttempts: 2 } };
     },
     agentEnd(event, ctx) {
-      if (registry.activeForOwner(ctx.sessionKey, ctx.runId ?? event.runId).length > 0) {
+      if (registry.leasesForOwner(ctx.sessionKey, ctx.runId ?? event.runId).length > 0) {
         log(api, "agent_end", "violation", ReasonCodes.LeaseAgentEndViolation);
       }
     },

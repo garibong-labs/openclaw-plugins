@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0] - 2026-09-03
+
+- Add durable `prepared` and `active` lease phases; registration now prepares
+  only, prepared leases block owner completion, and cron ticks cannot publish.
+- Add same-owner-session `commit_activation`, which accepts activation only
+  through exact evidence from the content-attested host-transport contract and
+  remains retryable after an unpersisted commit.
+- Add same-owner-session `abort_preactivation`, which releases only after the
+  attested transport atomically proves and seals a no-ACP-mutation exit.
+- Keep ordinary prepared/active release denied and preserve exact terminal
+  recovery, cron job, destination/account, digest, fence, and cleanup bindings.
+- Extend the closed OpenClaw 2026.8.1 tool/output schema and lifecycle tests.
+
 ## [0.5.1] - 2026-09-03
 
 - Replace the model-backed report automation with a bounded OpenClaw 2026.8.1

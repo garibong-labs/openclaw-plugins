@@ -21,6 +21,10 @@ afterEach(() => {
   while (roots.length > 0) fs.rmSync(roots.pop()!, { recursive: true, force: true });
   delete (globalThis as Record<string, unknown>).__acpControllerPumpStatus;
   delete (globalThis as Record<string, unknown>).__acpControllerAck;
+  delete (globalThis as Record<string, unknown>).__acpControllerActivation;
+  delete (globalThis as Record<string, unknown>).__acpControllerAbort;
+  delete (globalThis as Record<string, unknown>).__acpControllerActivationInput;
+  delete (globalThis as Record<string, unknown>).__acpControllerAbortInput;
 });
 
 function fixture(): {
@@ -54,9 +58,20 @@ function fixture(): {
     "}",
   ].join("\n"), { mode: 0o644 });
   const host = path.join(root, "acp-host-transport.mjs");
-  fs.writeFileSync(host,
-    "export const REPORT_ATTEMPT_TTL_MS = 300000; export function acknowledgeHostTransportReport(input) { if (globalThis.__acpControllerAck === 'throw') throw new Error('stale'); globalThis.__acpControllerAck = input; }\n",
-    { mode: 0o644 });
+  fs.writeFileSync(host, [
+    "export const REPORT_ATTEMPT_TTL_MS = 300000;",
+    "export function confirmHostTransportActivation(input) {",
+    " globalThis.__acpControllerActivationInput = input;",
+    " const state = globalThis.__acpControllerActivation ?? 'confirmed'; if (state === 'throw') throw new Error('unproven');",
+    " return { schemaVersion: 'acp-host-controller-lease.v1', type: state === 'mismatch' ? 'host_transport_preactivation_aborted' : 'host_transport_activation_confirmed', processHandle: input.processHandle };",
+    "}",
+    "export function abortHostTransportPreactivation(input) {",
+    " globalThis.__acpControllerAbortInput = input;",
+    " const state = globalThis.__acpControllerAbort ?? 'preactivation_exit'; if (state !== 'preactivation_exit') throw new Error('denied');",
+    " return { schemaVersion: 'acp-host-controller-lease.v1', type: 'host_transport_preactivation_aborted', processHandle: input.processHandle };",
+    "}",
+    "export function acknowledgeHostTransportReport(input) { if (globalThis.__acpControllerAck === 'throw') throw new Error('stale'); globalThis.__acpControllerAck = input; }",
+  ].join("\n"), { mode: 0o644 });
   return { root, state, transport, pump, host, message };
 }
 
@@ -75,8 +90,13 @@ function register(registry: LeaseRegistry, f: ReturnType<typeof fixture>, overri
   });
 }
 
+async function activate(registry: LeaseRegistry, entry: ActiveLease): Promise<ActiveLease> {
+  await registry.commitActivation(entry);
+  return entry;
+}
+
 describe("owner-private persistent lease registry", () => {
-  it("persists atomically with owner-only modes and reloads the active lease", () => {
+  it("registers and durably reloads only a prepared lease", () => {
     const f = fixture();
     const first = new LeaseRegistry(f.state);
     register(first, f);
@@ -84,6 +104,8 @@ describe("owner-private persistent lease registry", () => {
     assert.equal(fs.statSync(first.file).mode & 0o777, 0o600);
     const reloaded = new LeaseRegistry(f.state);
     assert.equal(reloaded.getByToken("lease-token-example-00000001")?.jobId, "job-example-1");
+    assert.equal(reloaded.getByToken("lease-token-example-00000001")?.phase, "prepared");
+    assert.equal(reloaded.getByToken("lease-token-example-00000001")?.cleanupState, null);
   });
 
   it("rejects duplicates, symlinks, and insecure private files", () => {
@@ -114,6 +136,17 @@ describe("owner-private persistent lease registry", () => {
 });
 
 describe("controller caller and delivery binding", () => {
+  it("denies automation ticks while the durable lease is only prepared", async () => {
+    const f = fixture();
+    const registry = new LeaseRegistry(f.state);
+    const entry = register(registry, f);
+    await assert.rejects(
+      new ReportController(registry).tick(entry, "agent:main:cron:job-example-1:run:tick-1"),
+      /controller\.lease_prepared/u,
+    );
+    assert.equal(entry.phase, "prepared");
+  });
+
   it("binds ticks to the exact main cron job session", () => {
     const f = fixture();
     const registry = new LeaseRegistry(f.state);
@@ -128,6 +161,7 @@ describe("controller caller and delivery binding", () => {
     const f = fixture();
     const registry = new LeaseRegistry(f.state);
     const entry = register(registry, f);
+    await activate(registry, entry);
     const controller = new ReportController(registry);
     const sessionKey = "agent:main:cron:job-example-1:run:tick-1";
     assert.deepEqual(await controller.tick(entry, sessionKey), { status: "delivery_pending", message: f.message,
@@ -144,6 +178,7 @@ describe("controller caller and delivery binding", () => {
       ownerRunId: "owner-run-example-2", jobId: "job-example-2",
       destination: entry.destination,
     });
+    await activate(registry, secondEntry);
     const copy = { ...internals.pending.values().next().value, leaseHash: secondEntry.leaseHash };
     internals.pending.set(secondEntry.leaseHash, copy);
     assert.equal(controller.authorizeSending(f.message, { sessionKey, channelId: "discord",
@@ -154,6 +189,7 @@ describe("controller caller and delivery binding", () => {
     const f = fixture();
     const registry = new LeaseRegistry(f.state);
     const entry = register(registry, f);
+    await activate(registry, entry);
     const controller = new ReportController(registry);
     const sessionKey = "agent:main:cron:job-example-1:run:tick-1";
     await controller.tick(entry, sessionKey);
@@ -175,6 +211,7 @@ describe("controller caller and delivery binding", () => {
     const f = fixture();
     const registry = new LeaseRegistry(f.state);
     const entry = register(registry, f);
+    await activate(registry, entry);
     const controller = new ReportController(registry);
     const sessionKey = "agent:main:cron:job-example-1:run:tick-1";
     await controller.tick(entry, sessionKey);
@@ -200,6 +237,7 @@ describe("controller caller and delivery binding", () => {
       const f = fixture();
       const registry = new LeaseRegistry(f.state);
       const entry = register(registry, f);
+      await activate(registry, entry);
       (globalThis as Record<string, unknown>).__acpControllerPumpStatus = terminal;
       const result = await new ReportController(registry).tick(entry,
         "agent:main:cron:job-example-1:run:tick-1");
@@ -230,7 +268,8 @@ describe("receipt time and lifecycle enforcement", () => {
       registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
     } as unknown as GuardHostApi;
     const surfaces = createControllerSurfaces(api);
-    register(surfaces.registry, f);
+    const entry = register(surfaces.registry, f);
+    await activate(surfaces.registry, entry);
     policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "call-example", params: { action: "status" } },
       { toolName: "acp_report_controller", agentId: "helper", sessionKey: "agent:helper:example", runId: "helper-run" });
     const tool = toolFactory!({ agentId: "helper", sessionKey: "agent:helper:example" });
@@ -265,6 +304,7 @@ describe("receipt time and lifecycle enforcement", () => {
     } as unknown as GuardHostApi;
     const surfaces = createControllerSurfaces(api);
     const entry = register(surfaces.registry, f);
+    await activate(surfaces.registry, entry);
     surfaces.registry.setCleanupState(entry, "terminal_acked");
 
     const invoke = async (id: string, ctx: Record<string, unknown>, action: "status" | "tick" | "release") => {
@@ -316,7 +356,8 @@ describe("receipt time and lifecycle enforcement", () => {
       registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
     } as unknown as GuardHostApi;
     const surfaces = createControllerSurfaces(api);
-    register(surfaces.registry, f);
+    const entry = register(surfaces.registry, f);
+    await activate(surfaces.registry, entry);
     const owner = { toolName: "acp_report_controller", agentId: "main",
       sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-1",
       requester: { senderIsOwner: true } };
@@ -325,5 +366,135 @@ describe("receipt time and lifecycle enforcement", () => {
       { action: "release", leaseToken: "lease-token-example-00000001" });
     assert.equal((result.details as Record<string, unknown>).code, ReasonCodes.ControllerReleaseDenied);
     assert.ok(surfaces.registry.getByToken("lease-token-example-00000001"));
+  });
+
+  it("commits activation only from attested evidence and is retryable from a fresh same-session owner run", async () => {
+    const f = fixture();
+    let policy: { evaluate: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown } | undefined;
+    let toolFactory: ((ctx: Record<string, unknown>) => { outputSchema?: unknown;
+      execute: (id: string, params: unknown) => Promise<Record<string, unknown>> }) | undefined;
+    const logs: string[] = [];
+    const api = {
+      id: "acp-lifecycle-guard", logger: { warn: (line: unknown) => logs.push(String(line)) },
+      runtime: { state: { resolveStateDir: () => f.state } }, on: () => {},
+      registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
+      registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
+    } as unknown as GuardHostApi;
+    const surfaces = createControllerSurfaces(api);
+    const originalOwner = { toolName: "acp_report_controller", agentId: "main",
+      sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-1",
+      requester: { senderIsOwner: true } };
+    const invoke = async (id: string, ctx: Record<string, unknown>, params: Record<string, unknown>) => {
+      policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id, params }, ctx);
+      return toolFactory!(ctx).execute(id, params);
+    };
+    const registered = await invoke("register-prepared", originalOwner, {
+      action: "register", leaseToken: "lease-token-example-00000001", transportFile: f.transport,
+      processHandle: "process-example-1", jobId: "job-example-1",
+      destination: { channel: "discord", accountId: "account-example", conversationId: "1" },
+      reportPumpEntry: f.pump, hostTransportEntry: f.host,
+    });
+    assert.deepEqual(registered.details, { status: "prepared" });
+    assert.ok(toolFactory!(originalOwner).outputSchema);
+    assert.deepEqual(policy!.evaluate({ toolName: "sessions_yield", params: {} }, originalOwner),
+      { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion });
+    assert.deepEqual(policy!.evaluate({ toolName: "message", params: { final: true } }, originalOwner),
+      { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion });
+    const widened = await invoke("commit-widened", originalOwner, {
+      action: "commit_activation", leaseToken: "lease-token-example-00000001", activated: true,
+    });
+    assert.equal((widened.details as Record<string, unknown>).code, ReasonCodes.ControllerInputInvalid);
+    assert.equal(surfaces.registry.getByToken("lease-token-example-00000001")?.phase, "prepared");
+
+    (globalThis as Record<string, unknown>).__acpControllerActivation = "throw";
+    const unproven = await invoke("commit-unproven", originalOwner, {
+      action: "commit_activation", leaseToken: "lease-token-example-00000001",
+    });
+    assert.equal((unproven.details as Record<string, unknown>).code,
+      "acp_lifecycle_guard.controller.activation_not_confirmed");
+    assert.equal(surfaces.registry.getByToken("lease-token-example-00000001")?.phase, "prepared");
+    (globalThis as Record<string, unknown>).__acpControllerActivation = "mismatch";
+    const drifted = await invoke("commit-drifted", originalOwner, {
+      action: "commit_activation", leaseToken: "lease-token-example-00000001",
+    });
+    assert.equal((drifted.details as Record<string, unknown>).code,
+      "acp_lifecycle_guard.controller.activation_evidence_invalid");
+
+    const wrongSession = await invoke("commit-wrong-session", { ...originalOwner,
+      sessionKey: "agent:main:discord:example-other", runId: "owner-run-example-2" }, {
+      action: "commit_activation", leaseToken: "lease-token-example-00000001",
+    });
+    assert.equal((wrongSession.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
+    (globalThis as Record<string, unknown>).__acpControllerActivation = "confirmed";
+    const persistInternals = surfaces.registry as unknown as { persist: () => void };
+    const realPersist = persistInternals.persist.bind(surfaces.registry);
+    persistInternals.persist = () => { throw new Error("synthetic persistence failure"); };
+    const unpersisted = await invoke("commit-unpersisted", originalOwner, {
+      action: "commit_activation", leaseToken: "lease-token-example-00000001",
+    });
+    persistInternals.persist = realPersist;
+    assert.equal((unpersisted.details as Record<string, unknown>).code,
+      "acp_lifecycle_guard.controller.failed");
+    assert.equal(surfaces.registry.getByToken("lease-token-example-00000001")?.phase, "prepared");
+    assert.equal(new LeaseRegistry(f.state).getByToken("lease-token-example-00000001")?.phase, "prepared");
+    const freshOwner = { ...originalOwner, runId: "owner-run-example-2" };
+    const committed = await invoke("commit-retry", freshOwner, {
+      action: "commit_activation", leaseToken: "lease-token-example-00000001",
+    });
+    assert.deepEqual(committed.details, { status: "active" });
+    assert.deepEqual((globalThis as Record<string, unknown>).__acpControllerActivationInput,
+      { transportFile: f.transport, processHandle: "process-example-1" });
+    assert.equal(surfaces.registry.getByToken("lease-token-example-00000001")?.phase, "active");
+    const idempotent = await invoke("commit-idempotent", freshOwner, {
+      action: "commit_activation", leaseToken: "lease-token-example-00000001",
+    });
+    assert.deepEqual(idempotent.details, { status: "active" });
+    const abortActive = await invoke("abort-active", freshOwner, {
+      action: "abort_preactivation", leaseToken: "lease-token-example-00000001",
+    });
+    assert.equal((abortActive.details as Record<string, unknown>).code,
+      ReasonCodes.ControllerPreactivationAbortDenied);
+    assert.ok(logs.every((line) => !line.includes("example-owner") && !line.includes("lease-token")));
+  });
+
+  it("aborts only a prepared transport with authoritative no-mutation evidence", async () => {
+    const f = fixture();
+    let policy: { evaluate: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown } | undefined;
+    let toolFactory: ((ctx: Record<string, unknown>) => {
+      execute: (id: string, params: unknown) => Promise<Record<string, unknown>> }) | undefined;
+    const api = {
+      id: "acp-lifecycle-guard", logger: { warn: () => {} },
+      runtime: { state: { resolveStateDir: () => f.state } }, on: () => {},
+      registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
+      registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
+    } as unknown as GuardHostApi;
+    const surfaces = createControllerSurfaces(api);
+    const entry = register(surfaces.registry, f);
+    const owner = { toolName: "acp_report_controller", agentId: "main",
+      sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-2",
+      requester: { senderIsOwner: true } };
+    const invokeAbort = async (id: string, ctx = owner) => {
+      policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id,
+        params: { action: "abort_preactivation" } }, ctx);
+      return toolFactory!(ctx).execute(id, {
+        action: "abort_preactivation", leaseToken: "lease-token-example-00000001",
+      });
+    };
+    const crossAgent = await invokeAbort("abort-cross-agent", { ...owner, agentId: "helper" });
+    assert.equal((crossAgent.details as Record<string, unknown>).code,
+      ReasonCodes.ControllerPreactivationAbortDenied);
+    for (const evidence of ["activation_confirmed", "started", "activity", "terminal_intent", "uncertain"]) {
+      (globalThis as Record<string, unknown>).__acpControllerAbort = evidence;
+      const denied = await invokeAbort(`abort-after-${evidence}`);
+      assert.equal((denied.details as Record<string, unknown>).code,
+        ReasonCodes.ControllerPreactivationAbortDenied);
+      assert.equal(entry.phase, "prepared");
+    }
+    (globalThis as Record<string, unknown>).__acpControllerAbort = "preactivation_exit";
+    const aborted = await invokeAbort("abort-safe");
+    assert.deepEqual(aborted.details, { status: "aborted" });
+    assert.deepEqual((globalThis as Record<string, unknown>).__acpControllerAbortInput,
+      { transportFile: f.transport, processHandle: "process-example-1" });
+    assert.equal(surfaces.registry.getByToken("lease-token-example-00000001"), undefined);
   });
 });

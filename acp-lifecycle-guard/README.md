@@ -10,16 +10,35 @@ the durable, fenced handoff between one ACP run and one report-pump automation.
 
 ## Controller contract
 
-The controller exposes four actions through one plugin tool:
+The controller exposes six closed actions through one plugin tool:
 
 - `register`: main-owner only. Binds an opaque lease token to the exact owner
   session/run, ACP transport file and process handle, report-pump job,
   Discord conversation/account, and attested skills pump/transport entries.
+  It persists the lease in `prepared`; registration never authorizes a pump.
+- `commit_activation`: main-owner only in the exact registered owner session,
+  including a fresh authenticated run. It takes only `action` and `leaseToken`.
+  The controller calls the content-attested host transport's
+  `confirmHostTransportActivation({ transportFile, processHandle })` and
+  requires exactly
+  `{ schemaVersion:"acp-host-controller-lease.v1", type:"host_transport_activation_confirmed", processHandle }`
+  before persisting `prepared` → `active`. A caller cannot supply activation
+  evidence. Failed persistence leaves `prepared`, so this commit is retryable.
+- `abort_preactivation`: main-owner only in that same owner session and takes
+  only `action` and `leaseToken`. It calls the attested transport's
+  `abortHostTransportPreactivation({ transportFile, processHandle })` and
+  removes the prepared lease only for exactly
+  `{ schemaVersion:"acp-host-controller-lease.v1", type:"host_transport_preactivation_aborted", processHandle }`.
+  That transport operation must atomically stop/seal the prepared transport
+  and prove ACP mutation never began. Activation confirmation, `started`/ACP
+  evidence, post-activation terminal intent, live ambiguity, mismatches, or
+  unreadable evidence must fail closed. It can never remove an active lease.
 - `status`: available to an authenticated `main` owner run in the exact
   registered owner session, or to the exact bound cron session. This permits
   inspection after the registering run has ended without widening sessions.
 - `tick`: available only to `main` running as the exact `cron:<jobId>` session.
-  It imports the attested skills pump in-process and returns either a fresh
+  A prepared lease returns a stable error and cannot publish. Once active it
+  imports the attested skills pump in-process and returns either a fresh
   canonical `message`, `none_due`, or a terminal control status.
 - `release`: available after `terminal_acked` or `tracking_lost` to an
   authenticated `main` owner run in the exact registered owner session, or to
@@ -45,9 +64,14 @@ Registration requires these fields in addition to `action` and `leaseToken`:
 }
 ```
 
+Successful `register`, `commit_activation`, and `abort_preactivation` outputs
+are exactly `{ "status":"prepared" }`, `{ "status":"active" }`, and
+`{ "status":"aborted" }`. `status` returns `prepared` or `active`, or the
+existing terminal cleanup shape.
+
 The token is hashed before persistence and is never logged or returned. The
 registry lives below OpenClaw's state directory, uses a `0700` directory and a
-`0600` atomically replaced file, and is capped at 64 active leases. The
+`0600` atomically replaced file, and is capped at 64 prepared/active leases. The
 transport and optional snapshot must be owner-only regular files. Every path
 must be absolute, non-symlinked, and owned by the current user. The mutable
 transport remains bound to that exact private path while its atomically
@@ -58,6 +82,15 @@ have their canonical basenames in one directory.
 Duplicate tokens, jobs, transports, and owner run bindings are rejected. The
 caller cannot supply a job identity to `tick`; the controller derives it from
 the host-authenticated cron session key and compares it with the registration.
+
+The preparation coordinator's exact successful order is automation add,
+transport prepare, controller `register` (`prepared`), transport `activate`,
+then controller `commit_activation` (`active`). Before activation begins, its
+rollback order is automation removal first and `abort_preactivation` second;
+failure to remove the exact job leaves the prepared lease intact. If transport
+activation succeeds but commit does not, neither removal nor abort is safe:
+retain the token privately and retry `commit_activation` from a fresh
+authenticated `main` run in the same canonical owner session.
 
 ## Authoritative delivery
 
@@ -90,7 +123,7 @@ status, the authenticated current job id, and the fixed cleanup value
 `remove_current_job_then_release_lease`. Tracking loss returns the same cleanup
 fields with status `tracking_lost`. The isolated cron run must remove only its
 own job using the host's self-removal restriction, then release the lease.
-Every release is denied while active.
+Every ordinary release is denied while prepared or active.
 
 The tool declares a closed structured output schema for every success, quiet,
 terminal, delivery, and error result. A pending result includes the exact
@@ -114,17 +147,17 @@ The host already restricts a cron run's `automations` tool to introspection and
 removal of its own job. The controller independently binds tick and release to
 the same job identity.
 
-## Active-lease lifecycle enforcement
+## Lease lifecycle enforcement
 
 The manifest declares the scoped trusted policy
 `acp-report-controller-lifecycle-v1`. It applies only to
 `acp_report_controller`, `sessions_yield`, and `message`:
 
-- `sessions_yield` is blocked for the exact owner run while its lease is active.
+- `sessions_yield` is blocked for the exact owner run while its lease is prepared or active.
 - `message(final:true)` and an omitted `final` are blocked; required lifecycle
   publication uses `message(final:false)` and remains allowed.
 - `before_agent_finalize` requests a bounded fail-closed revision while the
-  exact owner lease is active.
+  exact owner lease is prepared or active.
 - `agent_end` emits one bounded, content-free violation and does not release the
   lease.
 
@@ -135,11 +168,12 @@ unavoidable owner end never erases the lease, and the cron controller continues
 without the direct owner turn.
 
 Persisted terminal leases remain recoverable after that end: a fresh
-owner-authenticated `main` run in the same canonical owner session may inspect
-status and release `terminal_acked` or `tracking_lost`. A different session,
-agent, unauthenticated sender, or active lease is denied. Tick authority and all
-active lifecycle blocking remain bound to the original exact run and exact cron
-job.
+owner-authenticated `main` run in the same canonical owner session may commit a
+proven activation, abort a transport-proven preactivation exit, inspect status,
+and release `terminal_acked` or `tracking_lost`. A different session, agent,
+unauthenticated sender, prepared ordinary release, or active release is denied.
+Tick authority and lifecycle blocking remain bound to the original exact run
+and exact cron job.
 
 ## Lifecycle validation and migration
 
