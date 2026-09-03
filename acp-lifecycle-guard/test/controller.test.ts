@@ -35,7 +35,10 @@ function fixture(): {
   host: string;
   message: string;
 } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-controller-test-"));
+  // `os.tmpdir()` traverses a symlinked ancestor on macOS (`/var` ->
+  // `/private/var`), and the registry stores and compares canonical paths,
+  // so the fixture root must be canonical before anything is attested.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acp-controller-test-")));
   roots.push(root);
   const state = path.join(root, "state");
   fs.mkdirSync(state, { mode: 0o700 });

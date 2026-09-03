@@ -51,8 +51,6 @@ export const ReasonCodes = {
 
   /** Completion report duration line is not the canonical form. */
   CompletionDurationDrift: `${REASON_CODE_PREFIX}.completion.duration_drift`,
-  /** Completion report next-step bullet is not the canonical sentence. */
-  CompletionNextLineDrift: `${REASON_CODE_PREFIX}.completion.next_line_drift`,
   /** Completion report contains a recognized operational subject. */
   CompletionForbiddenSubject: `${REASON_CODE_PREFIX}.completion.forbidden_subject`,
 

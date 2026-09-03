@@ -191,6 +191,21 @@ export const CORRECTION_START_LAYOUT: readonly LineSpec[] = [
   ...START_BODY,
 ];
 
+/**
+ * Terminal outcome heading.
+ *
+ * The heading must agree with the title's terminal marker; that cross-line
+ * agreement is enforced in `validate.ts` against
+ * `COMPLETION_OUTCOME_HEADING_INDEX`, which is derived from this named spec
+ * rather than hard-coded, so inserting a line above it cannot silently move
+ * the check onto a different line.
+ */
+const COMPLETION_OUTCOME_HEADING_SPEC: LineSpec = {
+  kind: "pattern",
+  source: "^(?:✅ \\*\\*ACP 완료\\*\\*|⛔ \\*\\*ACP 취소\\*\\*|❌ \\*\\*ACP 실패\\*\\*)$",
+  code: ReasonCodes.SectionHeadingDrift,
+};
+
 export const COMPLETION_LAYOUT: readonly LineSpec[] = [
   {
     kind: "pattern",
@@ -206,11 +221,7 @@ export const COMPLETION_LAYOUT: readonly LineSpec[] = [
     code: ReasonCodes.CompletionDurationDrift,
   },
   blank(),
-  {
-    kind: "pattern",
-    source: "^(?:✅ \\*\\*ACP 완료\\*\\*|⛔ \\*\\*ACP 취소\\*\\*|❌ \\*\\*ACP 실패\\*\\*)$",
-    code: ReasonCodes.SectionHeadingDrift,
-  },
+  COMPLETION_OUTCOME_HEADING_SPEC,
   bullet(),
   blank(),
   heading("🧪 **ACP 자체 검증**"),
@@ -225,6 +236,11 @@ export const COMPLETION_LAYOUT: readonly LineSpec[] = [
   heading("🔒 **외부 작업**"),
   bullet(),
 ];
+
+/** Line index of the terminal outcome heading, derived from its named spec. */
+export const COMPLETION_OUTCOME_HEADING_INDEX = COMPLETION_LAYOUT.indexOf(
+  COMPLETION_OUTCOME_HEADING_SPEC,
+);
 
 export function compileLineSpec(spec: LineSpec): CompiledLineSpec {
   if (spec.kind === "blank") {

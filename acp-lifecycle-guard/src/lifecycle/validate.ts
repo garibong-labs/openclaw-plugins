@@ -11,6 +11,7 @@ import { hasTrailingWhitespace, toLines } from "./normalize.ts";
 import type { LifecycleKind } from "./kinds.ts";
 import {
   COMPLETION_LAYOUT,
+  COMPLETION_OUTCOME_HEADING_INDEX,
   CORRECTION_START_LAYOUT,
   INTERMEDIATE_DELTA_BULLET_INDEX,
   INTERMEDIATE_ELAPSED_LINE_INDEX,
@@ -170,7 +171,7 @@ function validateCompletion(
   if (!structural.ok) return structural;
   const expectedOutcome = (lines[0] ?? "").startsWith("🏁") ? "✅ **ACP 완료**" :
     (lines[0] ?? "").startsWith("⛔") ? "⛔ **ACP 취소**" : "❌ **ACP 실패**";
-  if (lines[6] !== expectedOutcome) {
+  if (lines[COMPLETION_OUTCOME_HEADING_INDEX] !== expectedOutcome) {
     return { ok: false, reasonCode: ReasonCodes.SectionHeadingDrift };
   }
   for (const forbidden of TERMINAL_FORBIDDEN_SUBJECTS) {

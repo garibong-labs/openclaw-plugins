@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { mkdtempSync } from "node:fs";
+import { afterEach, describe, it } from "node:test";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -38,6 +38,26 @@ type Registration = {
 
 type LoggedCall = { level: string; args: unknown[] };
 
+/**
+ * One disposable state directory per fake host, removed after every test.
+ *
+ * `resolveStateDir` is a host accessor, not a factory: it must answer with the
+ * same directory every time it is called, and the directories it hands out must
+ * not survive the suite.
+ */
+const stateDirs: string[] = [];
+afterEach(() => {
+  while (stateDirs.length > 0) {
+    rmSync(stateDirs.pop()!, { recursive: true, force: true });
+  }
+});
+
+function createStateDir(): string {
+  const directory = realpathSync(mkdtempSync(path.join(tmpdir(), "acp-guard-test-")));
+  stateDirs.push(directory);
+  return directory;
+}
+
 function createFakeApi(pluginConfig?: Record<string, unknown>): {
   api: GuardHostApi;
   registrations: Registration[];
@@ -45,6 +65,7 @@ function createFakeApi(pluginConfig?: Record<string, unknown>): {
 } {
   const registrations: Registration[] = [];
   const logs: LoggedCall[] = [];
+  const stateDir = createStateDir();
   const record =
     (level: string) =>
     (...args: unknown[]): void => {
@@ -59,7 +80,7 @@ function createFakeApi(pluginConfig?: Record<string, unknown>): {
       error: record("error"),
     },
     ...(pluginConfig === undefined ? {} : { pluginConfig }),
-    runtime: { state: { resolveStateDir: () => mkdtempSync(path.join(tmpdir(), "acp-guard-test-")) } },
+    runtime: { state: { resolveStateDir: () => stateDir } },
     registerTool: () => {},
     registerTrustedToolPolicy: () => {},
     on: ((

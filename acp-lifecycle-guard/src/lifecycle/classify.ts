@@ -5,9 +5,11 @@
  * with a supported family's marker and contain the standalone `ACP` token. An
  * exact canonical family phrase is sufficient. A renamed title must instead
  * express that family's lifecycle intent and have at least two recognizable
- * family body lines later in the payload. Completion failure, cancellation,
- * blocker, tracking-loss, pending, and non-completion titles are excluded even
- * when their payload happens to resemble a lifecycle report.
+ * family body lines later in the payload. `acp-reporting-v3` publishes
+ * cancellation and failure as their own terminal families, so those two have
+ * their own marker rules; blocker, tracking-loss, pending, and negated titles
+ * stay excluded from every terminal rule even when their payload happens to
+ * resemble a lifecycle report.
  *
  * This boundary is deliberate and documented:
  *
@@ -94,6 +96,10 @@ const CLASSIFIER_RULES: readonly ClassifierRule[] = [
     marker: "⛔",
     canonicalPhrase: "ACP 취소 보고",
     nearTitleIntent: /취소/u,
+    // Mirrors the completion rule's pending / negated / tracking-loss guards so
+    // an announcement *about* a cancellation is not hard-validated as one.
+    excludedTitle:
+      /미취소|취소(?:\s*보고)?\s*(?:하지|못|예정)|차단|중단|추적\s*(?:실패|불가|손실)|추적\s*놓침/u,
     bodyAnchors: [...METADATA_ANCHORS, /^\u26D4 \*\*ACP 취소\*\*$/u, /^\uD83D\uDCE6 \*\*결과\*\*$/u],
   },
   {
@@ -101,6 +107,8 @@ const CLASSIFIER_RULES: readonly ClassifierRule[] = [
     marker: "❌",
     canonicalPhrase: "ACP 실패 보고",
     nearTitleIntent: /실패/u,
+    excludedTitle:
+      /미실패|실패(?:\s*보고)?\s*(?:하지|못|예정)|차단|중단|추적\s*(?:실패|불가|손실)|추적\s*놓침/u,
     bodyAnchors: [...METADATA_ANCHORS, /^\u274C \*\*ACP 실패\*\*$/u, /^\uD83D\uDCE6 \*\*결과\*\*$/u],
   },
 ];

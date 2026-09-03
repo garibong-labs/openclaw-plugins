@@ -1,5 +1,9 @@
 # Changelog
 
+All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
+plugin is versioned independently of the repository and follows
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 ## [0.6.0] - 2026-09-03
 
 - Add durable `prepared` and `active` lease phases; registration now prepares
@@ -41,10 +45,6 @@
 - Align validation with `acp-reporting-v3` positive deltas, structured terminal
   values, and completed/cancelled/failed terminal layouts.
 - Ship the deterministic every-ten-minute isolated automation payload template.
-
-All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
-plugin is versioned independently of the repository and follows
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.4.3] - 2026-08-31
 

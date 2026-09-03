@@ -163,6 +163,8 @@ describe("evaluateOutboundContent", () => {
       "🏁 **ACP 실행 취소 · 16:00 KST**",
       "🏁 **ACP 운영자 차단 · 16:00 KST**",
       "🏁 **ACP 추적 손실 · 16:00 KST**",
+      "⛔ **ACP 취소 예정 · 16:00 KST**",
+      "❌ **ACP 실패 예정 · 16:00 KST**",
     ]) {
       const report = replaceLine(CANONICAL_COMPLETION, 0, title);
       assert.deepEqual(

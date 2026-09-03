@@ -37,7 +37,11 @@ import {
   RECEIPT_REVISE_IDEMPOTENCY_KEY,
   RECEIPT_REVISE_INSTRUCTION,
 } from "./receipt/checkpoint.ts";
-import { createControllerSurfaces } from "./controller/surfaces.ts";
+import {
+  createControllerSurfaces,
+  type ControllerSurfaces,
+} from "./controller/surfaces.ts";
+import { safeControllerCode } from "./controller/registry.ts";
 
 export const PLUGIN_ID = "acp-lifecycle-guard";
 
@@ -447,12 +451,27 @@ export function createReceiptHookHandlers(
 }
 
 export function registerGuard(api: GuardHostApi): void {
-  const controller = createControllerSurfaces(api);
+  // The controller owns durable, attested on-disk state, so its construction
+  // has real failure modes the guard must survive: an attested skills entry
+  // legitimately replaced between Gateway restarts, a moved transport record,
+  // a state directory whose ownership or mode cannot be proven. None of those
+  // may cost the authoritative `message_sending` layout gate - losing the
+  // whole plugin is neither the documented fail-open on classification nor
+  // the documented fail-closed on validation. The controller surfaces are
+  // simply absent for this process, and the omission is loudly observable.
+  let controller: ControllerSurfaces | undefined;
+  try {
+    controller = createControllerSurfaces(api);
+  } catch (error) {
+    logDecision(api.logger, "warn", {
+      hook: "register",
+      outcome: "degraded",
+      kind: "controller",
+      reason: safeControllerCode(error),
+    });
+  }
   api.on("message_sending", createMessageSendingHandler(api), {
     priority: MESSAGE_SENDING_PRIORITY,
-  });
-  api.on("message_sending", controller.messageSending, {
-    priority: MESSAGE_SENDING_PRIORITY - 1,
   });
   const receipt = createReceiptHookHandlers(api);
   api.on("before_agent_run", receipt.beforeAgentRun, {
@@ -461,15 +480,21 @@ export function registerGuard(api: GuardHostApi): void {
   api.on("message_sent", receipt.messageSent, {
     priority: RECEIPT_HOOK_PRIORITY,
   });
-  api.on("message_sent", controller.messageSent, {
+  api.on("before_agent_finalize", receipt.beforeAgentFinalize, {
     priority: RECEIPT_HOOK_PRIORITY,
   });
-  api.on("before_agent_finalize", receipt.beforeAgentFinalize, {
+  api.on("agent_end", receipt.agentEnd, { priority: RECEIPT_HOOK_PRIORITY });
+  if (controller === undefined) {
+    return;
+  }
+  api.on("message_sending", controller.messageSending, {
+    priority: MESSAGE_SENDING_PRIORITY - 1,
+  });
+  api.on("message_sent", controller.messageSent, {
     priority: RECEIPT_HOOK_PRIORITY,
   });
   api.on("before_agent_finalize", controller.beforeAgentFinalize, {
     priority: RECEIPT_HOOK_PRIORITY + 1,
   });
-  api.on("agent_end", receipt.agentEnd, { priority: RECEIPT_HOOK_PRIORITY });
   api.on("agent_end", controller.agentEnd, { priority: RECEIPT_HOOK_PRIORITY });
 }

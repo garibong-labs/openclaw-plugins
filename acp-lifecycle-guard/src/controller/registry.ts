@@ -89,10 +89,19 @@ export function leaseHash(token: unknown): string {
   return crypto.createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-function assertOwnedRegularFile(
+/**
+ * Every ownership, symlink, permission, basename, and size check for one
+ * attested path, without reading its contents.
+ *
+ * `assertOwnedRegularFile` layers the content digest on top. Callers that only
+ * need the *identity* of a deliberately mutable file (the transport record)
+ * use this directly, so a 4 MiB read plus SHA-256 is not paid again on every
+ * tick and every `message_sent`.
+ */
+function statOwnedRegularFile(
   candidate: string,
   options: { privateFile: boolean; basename?: string },
-): FileAttestation {
+): { real: string; stat: fs.Stats } {
   if (!path.isAbsolute(candidate) || candidate.length > 4096 || candidate.includes("\0")) {
     fail("acp_lifecycle_guard.controller.path_invalid");
   }
@@ -116,6 +125,14 @@ function assertOwnedRegularFile(
     fail("acp_lifecycle_guard.controller.trust_entry_invalid");
   }
   if (stat.size > 4194304) fail("acp_lifecycle_guard.controller.file_too_large");
+  return { real, stat };
+}
+
+function assertOwnedRegularFile(
+  candidate: string,
+  options: { privateFile: boolean; basename?: string },
+): FileAttestation {
+  const { real, stat } = statOwnedRegularFile(candidate, options);
   return {
     path: real,
     device: stat.dev,
@@ -124,6 +141,19 @@ function assertOwnedRegularFile(
     modifiedMs: stat.mtimeMs,
     sha256: crypto.createHash("sha256").update(fs.readFileSync(real)).digest("hex"),
   };
+}
+
+/**
+ * Import an attested skills entry.
+ *
+ * The cache-busting key must be the *content digest* on every call site: the
+ * ES module registry keys on the full URL, so mixing digests and timestamps
+ * would instantiate the same trusted module twice in one process and split any
+ * state it keeps between activation and acknowledgement.
+ */
+function importAttested(entry: FileAttestation): Promise<Record<string, unknown>> {
+  return import(`${pathToFileURL(entry.path).href}?attested=${entry.sha256}`) as
+    Promise<Record<string, unknown>>;
 }
 
 function sameAttestation(left: FileAttestation, right: FileAttestation): boolean {
@@ -152,10 +182,14 @@ function validateAttestation(
       !Number.isFinite(value.modifiedMs) || !SHA256.test(value.sha256)) {
     fail("acp_lifecycle_guard.controller.registry_invalid");
   }
-  const current = assertOwnedRegularFile(value.path, {
-    privateFile, ...(basename === undefined ? {} : { basename }),
-  });
-  if (requireStable && !sameAttestation(value, current)) {
+  const options = { privateFile, ...(basename === undefined ? {} : { basename }) };
+  if (!requireStable) {
+    // Identity-only check: hashing a deliberately mutable record would only
+    // produce a digest this branch immediately discards.
+    statOwnedRegularFile(value.path, options);
+    return;
+  }
+  if (!sameAttestation(value, assertOwnedRegularFile(value.path, options))) {
     fail("acp_lifecycle_guard.controller.trust_changed");
   }
 }
@@ -325,16 +359,18 @@ export class LeaseRegistry {
 
   setCleanupState(entry: ControllerLease, state: Exclude<ControllerLease["cleanupState"], null>): void {
     if (entry.phase !== "active") fail("acp_lifecycle_guard.controller.phase_invalid");
+    const previous = entry.cleanupState;
     entry.cleanupState = state;
-    this.persist();
+    // Every mutating path rolls the in-memory entry back on a failed write, so
+    // a durable read after a persistence failure never disagrees with memory.
+    try { this.persist(); } catch (error) { entry.cleanupState = previous; throw error; }
   }
 
   async commitActivation(entry: ControllerLease): Promise<void> {
     if (entry.phase === "active") return;
     this.revalidate(entry);
-    const transport = await import(
-      `${pathToFileURL(entry.hostTransportEntry.path).href}?attested=${entry.hostTransportEntry.sha256}`
-    ) as { confirmHostTransportActivation?: (input: Record<string, unknown>) => unknown };
+    const transport = await importAttested(entry.hostTransportEntry) as
+      { confirmHostTransportActivation?: (input: Record<string, unknown>) => unknown };
     if (typeof transport.confirmHostTransportActivation !== "function") {
       fail("acp_lifecycle_guard.controller.activation_contract_invalid");
     }
@@ -363,9 +399,8 @@ export class LeaseRegistry {
       fail("acp_lifecycle_guard.controller.preactivation_abort_denied");
     }
     this.revalidate(entry);
-    const transport = await import(
-      `${pathToFileURL(entry.hostTransportEntry.path).href}?attested=${entry.hostTransportEntry.sha256}`
-    ) as { abortHostTransportPreactivation?: (input: Record<string, unknown>) => unknown };
+    const transport = await importAttested(entry.hostTransportEntry) as
+      { abortHostTransportPreactivation?: (input: Record<string, unknown>) => unknown };
     if (typeof transport.abortHostTransportPreactivation !== "function") {
       fail("acp_lifecycle_guard.controller.preactivation_contract_invalid");
     }
@@ -394,8 +429,10 @@ export class LeaseRegistry {
   }
 
   revalidate(entry: ControllerLease): void {
-    const mutableTransport = assertOwnedRegularFile(entry.transportFile.path, { privateFile: true });
-    if (mutableTransport.path !== entry.transportFile.path) {
+    // The transport record is mutable by contract, so only its identity is
+    // rechecked here; digesting it would be discarded work on a hot path.
+    const mutableTransport = statOwnedRegularFile(entry.transportFile.path, { privateFile: true });
+    if (mutableTransport.real !== entry.transportFile.path) {
       fail("acp_lifecycle_guard.controller.trust_changed");
     }
     const checks: Array<[FileAttestation, { privateFile: boolean; basename?: string }]> = [
@@ -450,8 +487,14 @@ function parseCanonicalReport(message: string): Record<string, unknown> {
   };
   if ((lines[0] ?? "").startsWith("🔄")) {
     const round = /^\uD83D\uDD22 \*\*라운드\*\*: ([1-9][0-9]*) · ([1-4])\/4 /u.exec(lines[4] ?? "");
-    const elapsed = /^\u23F1\uFE0F? \*\*ACP 시간\*\*: 전체 ([0-9]+)분 · 현재 단계 ([0-9]+)분 · 마지막 ACP 활동 ([0-9]+)분 전$/u.exec(lines[5] ?? "");
-    const delta = /^- Δ([0-9]+)(?: · (.*))$/u.exec(lines[9] ?? "");
+    // The activity label and the positive-delta grammar each keep one
+    // documented migration form that `validate.ts` still accepts. The parser
+    // must accept exactly the same inputs, or a report the guard passes as
+    // valid would fail its own tick.
+    const elapsed = /^\u23F1\uFE0F? \*\*ACP 시간\*\*: 전체 ([0-9]+)분 · 현재 단계 ([0-9]+)분 · (?:마지막 ACP 활동|마지막 변화) ([0-9]+)분 전$/u.exec(lines[5] ?? "");
+    const deltaLine = lines[9] ?? "";
+    const delta = /^- Δ([0-9]+) · (.*)$/u.exec(deltaLine) ??
+      /^- Δ\+([0-9]+) (.*)$/u.exec(deltaLine);
     if (!round || !elapsed || !delta) fail("acp_lifecycle_guard.controller.report_parse_failed");
     return { ...base, roundIndex: Number(round[1]), phaseIndex: Number(round[2]),
       totalMinutes: Number(elapsed[1]), phaseMinutes: Number(elapsed[2]),
@@ -482,7 +525,23 @@ export class ReportController {
     return agentId === "main" && exactCronJob(sessionKey) === entry.jobId;
   }
 
+  /**
+   * Drop attempts whose lease is gone.
+   *
+   * A released lease never ticks again, so its attempt would otherwise live
+   * for the process lifetime: unbounded growth across runs, and - worse - a
+   * later message with the same content would match the orphan by digest,
+   * find no lease behind it, and be cancelled as a scope mismatch. Unrelated
+   * traffic must stay fail-open.
+   */
+  private prunePending(): void {
+    for (const [hash] of this.pending) {
+      if (this.registry.getByHash(hash) === undefined) this.pending.delete(hash);
+    }
+  }
+
   async tick(entry: ActiveLease, sessionKey: string): Promise<ControllerTickResult> {
+    this.prunePending();
     this.registry.revalidate(entry);
     if (entry.phase !== "active") {
       fail("acp_lifecycle_guard.controller.lease_prepared");
@@ -495,7 +554,7 @@ export class ReportController {
       return { status: existing.outcome };
     }
     if (existing !== undefined) this.pending.delete(entry.leaseHash);
-    const transport = await import(`${pathToFileURL(entry.hostTransportEntry.path).href}?attested=${entry.hostTransportEntry.modifiedMs}`) as {
+    const transport = await importAttested(entry.hostTransportEntry) as {
       REPORT_ATTEMPT_TTL_MS?: unknown;
     };
     if (!Number.isSafeInteger(transport.REPORT_ATTEMPT_TTL_MS) ||
@@ -504,7 +563,7 @@ export class ReportController {
       fail("acp_lifecycle_guard.controller.trust_entry_invalid");
     }
     const claimedAtMs = Date.now();
-    const pump = await import(`${pathToFileURL(entry.reportPumpEntry.path).href}?attested=${entry.reportPumpEntry.modifiedMs}`) as {
+    const pump = await importAttested(entry.reportPumpEntry) as unknown as {
       runReportPump(input: Record<string, unknown>): Record<string, unknown>;
     };
     const result = pump.runReportPump({
@@ -542,6 +601,7 @@ export class ReportController {
 
   authorizeSending(content: string, context: { sessionKey?: string; channelId: string; accountId?: string; conversationId?: string }):
     "unrelated" | "authorized" | "ambiguous" | "scope_mismatch" {
+    this.prunePending();
     const digest = crypto.createHash("sha256").update(content, "utf8").digest("hex");
     const candidates = [...this.pending.values()].filter((candidate) => candidate.messageDigest === digest);
     if (candidates.length === 0) return "unrelated";
@@ -559,6 +619,7 @@ export class ReportController {
 
   async acknowledgeSent(event: { content: string; success: boolean; messageId?: string },
     context: { sessionKey?: string; channelId: string; accountId?: string; conversationId?: string }): Promise<"unrelated" | "ignored" | "acked" | "failed"> {
+    this.prunePending();
     const digest = crypto.createHash("sha256").update(event.content, "utf8").digest("hex");
     const candidates = [...this.pending.values()].filter((candidate) => candidate.messageDigest === digest && candidate.authorized);
     if (candidates.length !== 1) return candidates.length === 0 ? "unrelated" : "ignored";
@@ -580,7 +641,7 @@ export class ReportController {
     if (deliveredAt === undefined) return "ignored";
     try {
       this.registry.revalidate(entry);
-      const transport = await import(`${pathToFileURL(entry.hostTransportEntry.path).href}?attested=${entry.hostTransportEntry.modifiedMs}`) as {
+      const transport = await importAttested(entry.hostTransportEntry) as unknown as {
         acknowledgeHostTransportReport(input: Record<string, unknown>): unknown;
       };
       transport.acknowledgeHostTransportReport({ transportFile: entry.transportFile.path,

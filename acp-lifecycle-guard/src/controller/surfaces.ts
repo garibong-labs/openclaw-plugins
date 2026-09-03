@@ -149,7 +149,10 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
       }
       const leases = registry.leasesForOwner(ctx.sessionKey, ctx.runId);
       if (leases.length === 0) return;
-      if (event.toolName === "message" && event.params.final === false) return;
+      // `params` is declared non-optional but is defensively narrowed
+      // everywhere else in this plugin; a throwing policy is not a safe way to
+      // read one optional flag.
+      if (event.toolName === "message" && object(event.params).final === false) return;
       log(api, "trusted_tool_policy", "blocked", ReasonCodes.LeaseEarlyCompletion);
       return { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion };
     },
