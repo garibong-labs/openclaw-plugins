@@ -4,6 +4,71 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-03
+
+- Restore fail-safe prepared cleanup ordering: remove the exact automation job
+  before requesting attested preactivation abort, with neither failure inferred
+  as success.
+- Allow authorized terminal and tracking-lost registry release after runtime
+  artifacts disappear, while retaining attestation for abort and all sensitive
+  lifecycle operations.
+- Fail closed before publication when an attested pump returns normalized or
+  migration-form bytes that differ from its canonical builder contract.
+- Declare `acp_report_controller` in `contracts.tools` and verify registration
+  through the real OpenClaw 2026.8.1 loader, including the explicit
+  `allowConversationAccess` installation grant and its bounded denial state.
+- Replace raw report/route controller results with a one-shot opaque
+  publication token; the trusted policy now injects the exact private report
+  and route at the message-tool boundary while retaining digest, scope, fence,
+  and receipt enforcement.
+- Filter equal report digests by exact cron session, channel, account, and
+  conversation before ambiguity checks.
+- Defer persisted path re-attestation until sensitive actions, cap repeated
+  prepared leases per owner, and allow transport-proven preactivation recovery
+  by the exact owner or job without time-only deletion.
+- Make the direct controller's POSIX/getuid and no-symlink-ancestor boundaries
+  explicit while preserving base guard loading, and close report harness
+  metadata to Claude Code and Codex so guard and parser acceptance agree.
+- Add durable `prepared` and `active` lease phases; registration now prepares
+  only, prepared leases block owner completion, and cron ticks cannot publish.
+- Add same-owner-session `commit_activation`, which accepts activation only
+  through exact evidence from the content-attested host-transport contract and
+  remains retryable after an unpersisted commit.
+- Add same-owner-session `abort_preactivation`, which releases only after the
+  attested transport atomically proves and seals a no-ACP-mutation exit.
+- Keep ordinary prepared/active release denied and preserve exact terminal
+  recovery, cron job, destination/account, digest, fence, and cleanup bindings.
+- Extend the closed OpenClaw 2026.8.1 tool/output schema and lifecycle tests.
+
+## [0.5.1] - 2026-09-03
+
+- Replace the model-backed report automation with a bounded OpenClaw 2026.8.1
+  headless script payload using an exact controller/message/automations
+  allowlist and no fallback delivery.
+- Declare the controller's closed structured output contract, including its
+  exact registered destination and authenticated current-job cleanup identity.
+- Permit terminal lease inspection and release from a fresh authenticated run
+  in the same canonical owner session while denying active manual release and
+  retaining exact-run tick and lifecycle enforcement.
+- Execute the shipped script in tests to prove exact single-send behavior,
+  quiet error handling, cleanup ordering, and release-after-removal semantics.
+
+## [0.5.0] - 2026-09-03
+
+- Add an owner-private atomic active-lease registry and the `acp_report_controller`
+  register/status/tick/release tool contract.
+- Execute the attested skills report pump in-process, retain fenced delivery
+  state privately, and acknowledge only exact host-proven logical deliveries.
+- Preserve distinct missing and uncertain delivery states until the attested
+  attempt TTL permits a newly fenced pump claim.
+- Bind ticks to the exact cron session/job and Discord destination/account,
+  including snowflake-derived receipt timestamps and multipart canonical IDs.
+- Enforce active leases across final message calls, yield, finalize, and
+  observable agent-end violations through a scoped trusted tool policy.
+- Align validation with `acp-reporting-v3` positive deltas, structured terminal
+  values, and completed/cancelled/failed terminal layouts.
+- Ship the deterministic every-ten-minute isolated automation payload template.
+
 ## [0.4.3] - 2026-08-31
 
 ### Fixed

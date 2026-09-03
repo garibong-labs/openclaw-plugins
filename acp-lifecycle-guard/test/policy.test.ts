@@ -128,7 +128,7 @@ describe("evaluateOutboundContent", () => {
 
   it("cancels a malformed completion report", () => {
     const decision = evaluateOutboundContent(
-      replaceLine(CANONICAL_COMPLETION, 16, "- 검증 시작"),
+      replaceLine(CANONICAL_COMPLETION, 15, "🔎 **후속**"),
       DEFAULT_GUARD_CONFIG,
     );
     assert.equal(decision.action, "cancel");
@@ -143,15 +143,13 @@ describe("evaluateOutboundContent", () => {
     assert.equal(decision.action, "observe");
   });
 
-  it("passes an unrecognised terminal failure report", () => {
+  it("cancels a malformed canonical-v3 terminal failure report", () => {
     const failure = [
       "❌ ACP 실패 보고 · 16:00 KST",
       "",
       "- 예시 실패 사유",
     ].join("\n");
-    assert.deepEqual(evaluateOutboundContent(failure, DEFAULT_GUARD_CONFIG), {
-      action: "pass",
-    });
+    assert.equal(evaluateOutboundContent(failure, DEFAULT_GUARD_CONFIG).action, "cancel");
   });
 
   it("passes lifecycle-shaped terminal failure and pending reports untouched", () => {
@@ -165,6 +163,8 @@ describe("evaluateOutboundContent", () => {
       "🏁 **ACP 실행 취소 · 16:00 KST**",
       "🏁 **ACP 운영자 차단 · 16:00 KST**",
       "🏁 **ACP 추적 손실 · 16:00 KST**",
+      "⛔ **ACP 취소 예정 · 16:00 KST**",
+      "❌ **ACP 실패 예정 · 16:00 KST**",
     ]) {
       const report = replaceLine(CANONICAL_COMPLETION, 0, title);
       assert.deepEqual(

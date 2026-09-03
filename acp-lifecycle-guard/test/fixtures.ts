@@ -17,7 +17,7 @@ export { INTERMEDIATE_ELAPSED_LINE_INDEX };
 export const CANONICAL_INTERMEDIATE = [
   "🔄 **ACP 중간 보고 · 14:20 KST**",
   "",
-  "🤖 **ACP**: example-harness · `example-model-1`",
+  "🤖 **ACP**: Codex · `example-model-1`",
   "📍 **작업**: `example-repo` · `feat/example`",
   "🔢 **라운드**: 1 · 2/4 구현",
   "⏱️ **ACP 시간**: 전체 20분 · 현재 단계 8분 · 마지막 ACP 활동 2분 전",
@@ -46,7 +46,7 @@ export const CANONICAL_INTERMEDIATE_WITH_ISSUE = [
 export const CANONICAL_START = [
   "🚀 **ACP 작업 시작 · 14:00 KST**",
   "",
-  "🤖 **ACP**: example-harness · `example-model-1`",
+  "🤖 **ACP**: Codex · `example-model-1`",
   "📍 **작업**: `example-repo` · `feat/example`",
   "",
   "🎯 **범위**",
@@ -72,7 +72,7 @@ export const CANONICAL_CORRECTION_START = CANONICAL_START.replace(
 export const ORCHESTRATOR_TERMINAL_COMPLETION = [
   "🏁 **ACP 완료 보고 · 15:40 KST**",
   "",
-  "🤖 **ACP**: example-harness · `example-model-1`",
+  "🤖 **ACP**: Codex · `example-model-1`",
   "📍 **작업**: `example-repo` · `feat/example`",
   "⏱️ **ACP 소요**: 42분 · 라운드 1",
   "",
@@ -95,7 +95,7 @@ export const ORCHESTRATOR_TERMINAL_COMPLETION = [
 export const CANONICAL_COMPLETION = [
   "🏁 **ACP 완료 보고 · 15:40 KST**",
   "",
-  "🤖 **ACP**: example-harness · `example-model-1`",
+  "🤖 **ACP**: Codex · `example-model-1`",
   "📍 **작업**: `example-repo` · `feat/example`",
   "⏱️ **ACP 소요**: 42분 · 라운드 1",
   "",

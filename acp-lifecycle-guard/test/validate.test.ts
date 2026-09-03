@@ -90,6 +90,11 @@ describe("valid canonical layouts", () => {
     );
   });
 
+  it("accepts the current v3 Δ<N> middle-report form", () => {
+    expectValid(replaceLine(CANONICAL_INTERMEDIATE, INTERMEDIATE_DELTA_BULLET_INDEX,
+      "- Δ2 · 게이트 2건 통과 확인"));
+  });
+
   it("accepts the activity age independently of the delta bullet in both directions", () => {
     expectValid(
       intermediateWithElapsed(
@@ -229,7 +234,7 @@ describe("intermediate drift", () => {
         "📍 **작업**: `example-repo` · `feat/example`",
       ),
       3,
-      "🤖 **ACP**: example-harness · `example-model-1`",
+      "🤖 **ACP**: Codex · `example-model-1`",
     );
     expectRejected(swapped, ReasonCodes.MetadataLineDrift);
   });
@@ -239,8 +244,16 @@ describe("intermediate drift", () => {
       replaceLine(
         CANONICAL_INTERMEDIATE,
         2,
-        "🤖 **ACP**: example-harness · example-model-1",
+        "🤖 **ACP**: Codex · example-model-1",
       ),
+      ReasonCodes.MetadataLineDrift,
+    );
+  });
+
+  it("rejects harnesses outside the controller's closed Claude Code/Codex set", () => {
+    expectRejected(
+      replaceLine(CANONICAL_INTERMEDIATE, 2,
+        "🤖 **ACP**: example-harness · `example-model-1`"),
       ReasonCodes.MetadataLineDrift,
     );
   });
@@ -311,6 +324,17 @@ describe("intermediate drift", () => {
         CANONICAL_INTERMEDIATE,
         INTERMEDIATE_DELTA_BULLET_INDEX,
         "- 새로운 결과 있음",
+      ),
+      ReasonCodes.IntermediateDeltaDrift,
+    );
+  });
+
+  it("rejects a v3 positive delta without its canonical separator", () => {
+    expectRejected(
+      replaceLine(
+        CANONICAL_INTERMEDIATE,
+        INTERMEDIATE_DELTA_BULLET_INDEX,
+        "- Δ2 새 결과",
       ),
       ReasonCodes.IntermediateDeltaDrift,
     );
@@ -429,10 +453,23 @@ describe("completion drift", () => {
     );
   });
 
-  it("rejects a drifted next-step sentence", () => {
+  it("accepts the v3 structured next-step slot", () => {
+    expectValid(replaceLine(CANONICAL_COMPLETION, 16, "- 소유자 검증 시작"));
+  });
+
+  for (const [title, heading] of [
+    ["⛔ **ACP 취소 보고 · 15:40 KST**", "⛔ **ACP 취소**"],
+    ["❌ **ACP 실패 보고 · 15:40 KST**", "❌ **ACP 실패**"],
+  ] as const) {
+    it(`accepts the canonical v3 terminal ${heading}`, () => {
+      expectValid(replaceLine(replaceLine(CANONICAL_COMPLETION, 0, title), 6, heading));
+    });
+  }
+
+  it("rejects a mismatched v3 terminal title and outcome", () => {
     expectRejected(
-      replaceLine(CANONICAL_COMPLETION, 16, "- 검증 시작"),
-      ReasonCodes.CompletionNextLineDrift,
+      replaceLine(CANONICAL_COMPLETION, 0, "⛔ **ACP 취소 보고 · 15:40 KST**"),
+      ReasonCodes.SectionHeadingDrift,
     );
   });
 
@@ -456,7 +493,7 @@ describe("completion drift", () => {
 describe("completion duration grammar", () => {
   // Production emits both the minute-only and the minute-plus-seconds form;
   // rejecting the latter cancelled valid completion reports.
-  const accepted = ["17분 31초", "42분", "0분", "0분 0초", "7분 09초", "128분 59초"];
+  const accepted = ["17분 31초", "42분", "0분", "0분 0초", "7분 09초", "128분 59초", "측정 불가"];
 
   for (const duration of accepted) {
     it(`accepts \`${duration}\``, () => {

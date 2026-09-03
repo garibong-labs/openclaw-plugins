@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Target-build smoke: `message_sending` cancellation and the owner-checkpoint
- * receipt hooks. `before_tool_call` must remain unregistered: on the pinned
- * host it globally promotes native Codex approvals for every session.
+ * Target-build smoke: `message_sending` cancellation, owner-checkpoint receipt
+ * hooks, and registration of the durable controller tool plus its bounded
+ * trusted-tool policy. A global `before_tool_call` hook remains unregistered.
  *
  * The unit suites exercise the pure policy functions. This smoke exercises the
  * *built* plugin through the *installed* OpenClaw hook runner instead, so it
@@ -10,8 +10,9 @@
  * long-established guarantees always run first:
  *
  * Phase A - shipped default configuration (`pluginConfig` absent):
- *  1. `dist/index.js` loads against the real `openclaw/plugin-sdk/plugin-entry`
- *     and its `register` puts all six handlers into the registry.
+ *  1. `dist/index.js` loads against the real `openclaw/plugin-sdk/plugin-entry`,
+ *     registers all controller and migration handlers, and exposes exactly one
+ *     controller tool plus one scoped trusted-tool policy.
  *  2. A canonical completion report carrying seconds (`17분 31초`) survives the
  *     authoritative guard - the regression this smoke exists for.
  *  3. A malformed lifecycle report is cancelled with the expected reason code.
@@ -98,6 +99,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -161,7 +163,7 @@ const SMOKE_SCENARIOS = [
  * One trusted cron agent-hook context per receipt scenario.
  *
  * The base shape carries no `jobId`, mirroring the installed embedded cron
- * path (`openclaw@2026.7.1-2`), where the cron executor passes
+ * path (`openclaw@2026.8.1`), where the cron executor passes
  * `jobId: params.job.id` into `runEmbeddedAgent` but the `hookCtx` the
  * embedded runner assembles for `before_agent_run` omits it (verified by
  * hand on the pinned build). The `jobid` scenario adds the field to mirror
@@ -261,10 +263,10 @@ function stageTargetBuild(openclawRoot: string): {
   mkdirSync(path.join(workspace, "node_modules"), { recursive: true });
   symlinkSync(openclawRoot, path.join(workspace, "node_modules", "openclaw"));
   cpSync(distDir, path.join(workspace, "dist"), { recursive: true });
-  writeFileSync(
-    path.join(workspace, "package.json"),
-    `${JSON.stringify({ name: `${PLUGIN_ID}-smoke`, private: true, type: "module" }, null, 2)}\n`,
-  );
+  cpSync(path.join(PLUGIN_ROOT, "openclaw.plugin.json"),
+    path.join(workspace, "openclaw.plugin.json"));
+  const packageDocument = JSON.parse(readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
+  writeFileSync(path.join(workspace, "package.json"), `${JSON.stringify(packageDocument, null, 2)}\n`);
 
   // Keep any host-side logging inside the disposable workspace.
   process.env.OPENCLAW_HOME = path.join(workspace, "openclaw-home");
@@ -274,6 +276,47 @@ function stageTargetBuild(openclawRoot: string): {
     workspace,
     entryUrl: pathToFileURL(path.join(workspace, "dist", "index.js")),
   };
+}
+
+function inspectStagedRuntime(
+  openclawRoot: string,
+  workspace: string,
+  allowConversationAccess: boolean,
+): Record<string, unknown> {
+  const configPath = path.join(workspace,
+    allowConversationAccess ? "config-granted.json" : "config-enable-only.json");
+  writeFileSync(configPath, `${JSON.stringify({
+    plugins: {
+      load: { paths: [workspace] },
+      entries: {
+        [PLUGIN_ID]: {
+          enabled: true,
+          ...(allowConversationAccess ? { hooks: { allowConversationAccess: true } } : {}),
+        },
+      },
+    },
+  }, null, 2)}\n`);
+  const childTemp = path.join(workspace, "tmp");
+  const childCache = path.join(workspace, "cache");
+  mkdirSync(childTemp, { recursive: true });
+  mkdirSync(childCache, { recursive: true });
+  const inspected = spawnSync(process.execPath, [path.join(openclawRoot, "openclaw.mjs"),
+    "plugins", "inspect", PLUGIN_ID, "--runtime", "--json"], {
+    cwd: workspace,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OPENCLAW_HOME: path.join(workspace,
+        allowConversationAccess ? "inspect-home-granted" : "inspect-home-enable-only"),
+      OPENCLAW_CONFIG_PATH: configPath,
+      OPENCLAW_QA_TEMP_ROOT: childTemp,
+      TMPDIR: childTemp,
+      XDG_CACHE_HOME: childCache,
+    },
+  });
+  assert.equal(inspected.status, 0,
+    `isolated runtime inspect failed: ${inspected.stderr || inspected.stdout}`);
+  return JSON.parse(inspected.stdout) as Record<string, unknown>;
 }
 
 /**
@@ -322,6 +365,8 @@ async function main(): Promise<void> {
   const openclawVersion = JSON.parse(
     readFileSync(path.join(openclawRoot, "package.json"), "utf8"),
   ).version as string;
+  assert.equal(openclawVersion, "2026.8.1",
+    "target-build smoke must run against the reviewed OpenClaw 2026.8.1 contract");
   process.stdout.write(
     `openclaw ${openclawVersion} (${HOOK_NAME} + receipt-hook runner)\n`,
   );
@@ -343,7 +388,7 @@ async function main(): Promise<void> {
   // prove what the host does with revise decisions and exhausted budgets.
   const agentHarness = await import(
     pathToFileURL(
-      requireFromWorkspace.resolve("openclaw/plugin-sdk/agent-harness"),
+      requireFromWorkspace.resolve("openclaw/plugin-sdk/agent-harness-runtime"),
     ).href
   );
   // The stable SDK subpath exporting the sent-message hook mappers the real
@@ -354,6 +399,11 @@ async function main(): Promise<void> {
       requireFromWorkspace.resolve("openclaw/plugin-sdk/hook-runtime"),
     ).href
   );
+  const policyBundleName = readdirSync(path.join(openclawRoot, "dist")).find((name) =>
+    name.startsWith("agent-tools.before-tool-call-") && name.endsWith(".js"));
+  assert.ok(policyBundleName, "installed trusted-tool policy runtime bundle is missing");
+  const agentToolPolicyRuntime = await import(pathToFileURL(
+    path.join(openclawRoot, "dist", policyBundleName)).href);
 
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -368,13 +418,43 @@ async function main(): Promise<void> {
     assert.equal(typeof entry.register, "function", "built entry registers");
     record("built dist/index.js loads against the installed plugin SDK");
 
+    const grantedInspect = inspectStagedRuntime(openclawRoot, workspace, true);
+    const grantedPlugin = grantedInspect.plugin as Record<string, unknown>;
+    assert.deepEqual(grantedPlugin.toolNames, ["acp_report_controller"]);
+    assert.deepEqual((grantedInspect.typedHooks as Array<Record<string, unknown>>)
+      .map((hook) => hook.name).sort(),
+    ["agent_end", "agent_end", "before_agent_finalize", "before_agent_finalize",
+      "before_agent_run", "message_sending", "message_sending", "message_sent", "message_sent"].sort());
+    const grantedDiagnostics = grantedInspect.diagnostics as Array<Record<string, unknown>>;
+    assert.equal(grantedDiagnostics.some((diagnostic) =>
+      String(diagnostic.message).includes("plugin must declare contracts.tools") ||
+      String(diagnostic.message).includes("typed hook") && String(diagnostic.message).includes("blocked")), false);
+
+    const enableOnlyInspect = inspectStagedRuntime(openclawRoot, workspace, false);
+    const enableOnlyPlugin = enableOnlyInspect.plugin as Record<string, unknown>;
+    assert.deepEqual(enableOnlyPlugin.toolNames, ["acp_report_controller"]);
+    const enableOnlyHookNames = (enableOnlyInspect.typedHooks as Array<Record<string, unknown>>)
+      .map((hook) => hook.name);
+    for (const hookName of ["before_agent_run", "before_agent_finalize", "agent_end"]) {
+      assert.equal(enableOnlyHookNames.includes(hookName), false,
+        `${hookName} must not be presented as installed without conversation access`);
+    }
+    const enableOnlyDiagnostics = enableOnlyInspect.diagnostics as Array<Record<string, unknown>>;
+    for (const hookName of ["before_agent_run", "before_agent_finalize", "agent_end"]) {
+      assert.ok(enableOnlyDiagnostics.some((diagnostic) =>
+        diagnostic.message === `typed hook "${hookName}" blocked because non-bundled plugins must set plugins.entries.${PLUGIN_ID}.hooks.allowConversationAccess=true`));
+    }
+    record("real isolated loader registers the controller tool and granted hook set; enable-only emits bounded conversation-hook diagnostics");
+
     // Mirror how the host turns `api.on(...)` into a typed hook registration
     // (openclaw dist `registry`: pluginId, hookName, handler, priority, source).
     const registerPlugin = (
       pluginConfig: Record<string, unknown> | undefined,
-    ): { typedHooks: TypedHook[]; logs: LogRecord[] } => {
+    ): { typedHooks: TypedHook[]; logs: LogRecord[]; tools: unknown[]; policies: unknown[] } => {
       const typedHooks: TypedHook[] = [];
       const logs: LogRecord[] = [];
+      const tools: unknown[] = [];
+      const policies: unknown[] = [];
       const logAt =
         (level: string) =>
         (...args: unknown[]): void => {
@@ -390,6 +470,9 @@ async function main(): Promise<void> {
           error: logAt("error"),
         },
         ...(pluginConfig === undefined ? {} : { pluginConfig }),
+        runtime: { state: { resolveStateDir: () => path.join(workspace, "state") } },
+        registerTool: (tool: unknown): void => { tools.push(tool); },
+        registerTrustedToolPolicy: (policy: unknown): void => { policies.push(policy); },
         on: (
           hookName: string,
           handler: unknown,
@@ -404,17 +487,44 @@ async function main(): Promise<void> {
           });
         },
       });
-      return { typedHooks, logs };
+      return { typedHooks, logs, tools, policies };
     };
 
-    const initRunner = (typedHooks: TypedHook[], pluginIds: string[]) => {
-      pluginRuntime.initializeGlobalHookRunner({
+    const initRunner = (typedHooks: TypedHook[], pluginIds: string[], trustedToolPolicies: unknown[] = []) => {
+      hookRuntime.initializeGlobalHookRunner({
         hooks: [],
         typedHooks,
+        trustedToolPolicies,
         plugins: pluginIds.map((id) => ({ id, status: "loaded" })),
       });
       return pluginRuntime.getGlobalHookRunner();
     };
+
+    const policyProbeRunner = initRunner([], ["smoke-policy-probe"], [{
+      pluginId: "smoke-policy-probe",
+      pluginName: "Smoke policy probe",
+      origin: "config",
+      source: "smoke:target-build",
+      rootDir: workspace,
+      policy: {
+        id: "smoke-policy-params-v1",
+        description: "Prove trusted policies can replace message-tool parameters.",
+        matcher: ["message"],
+        evaluate: () => ({ params: { action: "send", message: "injected", final: false } }),
+      },
+    }]);
+    assert.ok(policyProbeRunner);
+    const policyProbe = await agentToolPolicyRuntime.b({
+      toolName: "message",
+      params: { action: "send", message: "opaque", final: false },
+      toolCallId: "smoke-policy-call",
+      ctx: { agentId: "main", sessionKey: "agent:main:cron:smoke-policy:run:example" },
+    }) as Record<string, unknown>;
+    assert.deepEqual(policyProbe.params,
+      { action: "send", message: "injected", final: false },
+      `installed trusted policy failed to replace params: ${JSON.stringify(policyProbe)}`);
+    hookRuntime.resetGlobalHookRunner();
+    record("installed trusted-tool policy runtime applies bounded parameter replacement before execution");
 
     // Capture everything the host and the plugin emit during dispatch.
     process.stdout.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
@@ -436,24 +546,56 @@ async function main(): Promise<void> {
       const matching = defaultRegistration.typedHooks.filter(
         (hook) => hook.hookName === hookName,
       );
-      assert.equal(matching.length, 1, `exactly one ${hookName} handler`);
+      const expected = hookName === "before_agent_run" ? 1 : 2;
+      assert.equal(matching.length, expected, `expected ${expected} ${hookName} handler(s)`);
     }
+    assert.equal(defaultRegistration.tools.length, 1, "controller tool registered");
+    assert.equal(defaultRegistration.policies.length, 1, "scoped trusted tool policy registered");
+    const controllerFactory = defaultRegistration.tools[0] as
+      (ctx: Record<string, unknown>) => Record<string, unknown>;
+    const controllerTool = controllerFactory({ agentId: "main",
+      sessionKey: "agent:main:discord:smoke-owner" });
+    assert.equal(controllerTool.name, "acp_report_controller");
+    assert.ok(controllerTool.outputSchema,
+      "the installed 2026.8.1 tool catalog requires a declared details schema for deterministic script field use");
+    const controllerParameters = controllerTool.parameters as { oneOf: Array<{
+      properties: { action: { const: string } } }> };
+    assert.deepEqual(controllerParameters.oneOf.map((schema) => schema.properties.action.const),
+      ["register", "commit_activation", "abort_preactivation", "status", "tick", "release"],
+      "the installed 2026.8.1 tool catalog exposes the closed prepared-to-active action inventory");
+
+    const automationTemplate = JSON.parse(readFileSync(path.join(PLUGIN_ROOT,
+      "templates", "report-controller-automation.json"), "utf8")) as Record<string, unknown>;
+    const automationPayload = automationTemplate.payload as Record<string, unknown>;
+    assert.equal(automationPayload.kind, "script");
+    assert.equal(automationPayload.toolBudget, 5);
+    assert.deepEqual(automationPayload.toolsAllow,
+      ["acp_report_controller", "message", "automations"]);
+    assert.equal((automationTemplate.delivery as Record<string, unknown>).mode, "none");
+    assert.equal(Object.hasOwn(automationPayload, "model"), false);
+    assert.equal(Object.hasOwn(automationPayload, "message"), false);
+    assert.match(String(automationPayload.script),
+      /await automations\(\{ action: "remove", jobId \}\);\n  await acp_report_controller/u,
+      "release must follow awaited removal of the authenticated current job");
+    assert.match(String(automationPayload.script),
+      /message\(\{ action: "send", message: first\.publicationToken, final: false \}\)/u,
+      "automation must expose only the opaque publication token to the message tool call");
 
     let runner = initRunner(defaultRegistration.typedHooks, [PLUGIN_ID]);
     assert.ok(runner, "global hook runner is available");
     assert.equal(
-      pluginRuntime.hasGlobalHooks(HOOK_NAME),
+      runner.hasHooks(HOOK_NAME),
       true,
       `${HOOK_NAME} is visible to the global runner`,
     );
     assert.equal(
-      pluginRuntime.hasGlobalHooks(TOOL_HOOK_NAME),
+      runner.hasHooks(TOOL_HOOK_NAME),
       false,
       `${TOOL_HOOK_NAME} must not be registered: its presence promotes Codex approvals globally`,
     );
     for (const hookName of RECEIPT_HOOK_NAMES) {
       assert.equal(
-        pluginRuntime.hasGlobalHooks(hookName),
+        runner.hasHooks(hookName),
         true,
         `${hookName} is visible to the global runner`,
       );
@@ -487,7 +629,7 @@ async function main(): Promise<void> {
       );
     }
     record(
-      "built entry registers message and receipt hooks only; the installed runner + harness + mapper contracts are present",
+      "built entry registers a structured controller; the shipped headless script and installed runner + harness + mapper contracts are present",
     );
 
     const ctx = { channelId: SMOKE_SEND_CHANNEL };
@@ -606,7 +748,7 @@ async function main(): Promise<void> {
       "shipped default config (no pluginConfig) observes a missing receipt and finalizes untouched - end-to-end",
     );
 
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
 
     // ============ Installed-gate nullish normalization probes ==============
     const probeGateDecision = async (
@@ -630,7 +772,7 @@ async function main(): Promise<void> {
         { prompt: "smoke nullish probe", messages: [] },
         { trigger: "user" },
       );
-      pluginRuntime.resetGlobalHookRunner();
+      hookRuntime.resetGlobalHookRunner();
       return outcome as
         | { decision?: { outcome?: string; reason?: string } }
         | undefined;
@@ -852,7 +994,7 @@ async function main(): Promise<void> {
     );
     const uncorrelatableFinalize = await finalizeCheckpoint("cleanup");
 
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
 
     // Every before_agent_run scenario must come back from the *installed*
     // runner as an explicit pass decision attributed to this plugin. A void
@@ -1060,7 +1202,7 @@ async function main(): Promise<void> {
       idlessFinalizeEvent,
       idlessCtx,
     );
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
 
     assert.deepEqual(idlessStart, gatePass);
     assert.deepEqual(idlessSecondStart, gatePass);
@@ -1121,7 +1263,7 @@ async function main(): Promise<void> {
       BLOCKER_ID,
       "an earlier higher-priority block must stay attributed to the blocking plugin",
     );
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
 
     // A lower-priority block still wins over this guard's explicit pass.
     const stickyLate = registerPlugin({
@@ -1141,7 +1283,7 @@ async function main(): Promise<void> {
       "a later lower-priority block must not be un-stuck by this guard's explicit pass",
     );
     assert.equal(lateBlock?.pluginId, BLOCKER_ID);
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
     record(
       "two-handler gate composition: an earlier or later synthetic block stays sticky; this guard's explicit pass never overrides it",
     );
@@ -1223,7 +1365,7 @@ async function main(): Promise<void> {
       { runId: "smoke-run-override", messages: [], success: true },
       cronRunContext("override"),
     );
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
     record(
       "finalize-merge override: two overridden revise requests consume no budget; the guard's later winning revise is applied and charged for the bounded rounds, and the host then continues",
     );
@@ -1290,7 +1432,7 @@ async function main(): Promise<void> {
       ],
       "the installed harness accounting must charge the idempotency-key budget only when a revise decision wins the merge",
     );
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
     record(
       "installed finalize budget is charged per run and idempotency key only for revise decisions that win the merge - the contract the guard's accounting documents",
     );
@@ -1332,7 +1474,7 @@ async function main(): Promise<void> {
   } finally {
     process.stdout.write = realStdoutWrite;
     process.stderr.write = realStderrWrite;
-    pluginRuntime.resetGlobalHookRunner();
+    hookRuntime.resetGlobalHookRunner();
     rmSync(workspace, { recursive: true, force: true });
   }
 

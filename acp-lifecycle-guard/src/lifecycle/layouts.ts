@@ -34,7 +34,12 @@ const TIME_SUFFIX = "([01][0-9]|2[0-3]):[0-5][0-9] KST";
  * `17분 90초` stays duration drift, as does a missing unit, a missing
  * separating space, or a repeated segment.
  */
-const COMPLETION_DURATION_SOURCE = "[0-9]+분(?: [0-5]?[0-9]초)?";
+// acp-reporting-v3 deliberately treats the terminal elapsed value as a
+// structured, single-line slot.  In addition to normalized minute counts it
+// can emit a bounded unavailable value when the transport has no trustworthy
+// elapsed measurement.  Content screening is applied in validate.ts.
+const COMPLETION_DURATION_SOURCE =
+  "(?:[0-9]+분(?: [0-5]?[0-9]초)?|측정 불가)";
 
 /** Exactly one top-level bullet with visible text; nested bullets are drift. */
 const BULLET_SOURCE = "^- \\S.*$";
@@ -84,10 +89,10 @@ const heading = (text: string): LineSpec => ({
   code: ReasonCodes.SectionHeadingDrift,
 });
 
-/** `🤖 **ACP**: <harness> · `<exact-model>`` */
+/** `🤖 **ACP**: (Claude Code|Codex) · `<exact-model>`` */
 const ACP_HARNESS_LINE: LineSpec = {
   kind: "pattern",
-  source: "^🤖 \\*\\*ACP\\*\\*: \\S.* · `[^`]+`$",
+  source: "^🤖 \\*\\*ACP\\*\\*: (?:Claude Code|Codex) · `[^`]+`$",
   code: ReasonCodes.MetadataLineDrift,
 };
 
@@ -186,10 +191,25 @@ export const CORRECTION_START_LAYOUT: readonly LineSpec[] = [
   ...START_BODY,
 ];
 
+/**
+ * Terminal outcome heading.
+ *
+ * The heading must agree with the title's terminal marker; that cross-line
+ * agreement is enforced in `validate.ts` against
+ * `COMPLETION_OUTCOME_HEADING_INDEX`, which is derived from this named spec
+ * rather than hard-coded, so inserting a line above it cannot silently move
+ * the check onto a different line.
+ */
+const COMPLETION_OUTCOME_HEADING_SPEC: LineSpec = {
+  kind: "pattern",
+  source: "^(?:✅ \\*\\*ACP 완료\\*\\*|⛔ \\*\\*ACP 취소\\*\\*|❌ \\*\\*ACP 실패\\*\\*)$",
+  code: ReasonCodes.SectionHeadingDrift,
+};
+
 export const COMPLETION_LAYOUT: readonly LineSpec[] = [
   {
     kind: "pattern",
-    source: `^🏁 \\*\\*ACP 완료 보고 · ${TIME_SUFFIX}\\*\\*$`,
+    source: `^(?:🏁 \\*\\*ACP 완료 보고|⛔ \\*\\*ACP 취소 보고|❌ \\*\\*ACP 실패 보고) · ${TIME_SUFFIX}\\*\\*$`,
     code: ReasonCodes.TitleDrift,
   },
   blank(),
@@ -201,7 +221,7 @@ export const COMPLETION_LAYOUT: readonly LineSpec[] = [
     code: ReasonCodes.CompletionDurationDrift,
   },
   blank(),
-  heading("✅ **ACP 완료**"),
+  COMPLETION_OUTCOME_HEADING_SPEC,
   bullet(),
   blank(),
   heading("🧪 **ACP 자체 검증**"),
@@ -211,15 +231,16 @@ export const COMPLETION_LAYOUT: readonly LineSpec[] = [
   bullet(),
   blank(),
   heading("🔍 **다음**"),
-  {
-    kind: "literal",
-    text: "- Eli 독립 검증 시작",
-    code: ReasonCodes.CompletionNextLineDrift,
-  },
+  bullet(),
   blank(),
   heading("🔒 **외부 작업**"),
   bullet(),
 ];
+
+/** Line index of the terminal outcome heading, derived from its named spec. */
+export const COMPLETION_OUTCOME_HEADING_INDEX = COMPLETION_LAYOUT.indexOf(
+  COMPLETION_OUTCOME_HEADING_SPEC,
+);
 
 export function compileLineSpec(spec: LineSpec): CompiledLineSpec {
   if (spec.kind === "blank") {

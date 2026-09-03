@@ -11,6 +11,7 @@ import { hasTrailingWhitespace, toLines } from "./normalize.ts";
 import type { LifecycleKind } from "./kinds.ts";
 import {
   COMPLETION_LAYOUT,
+  COMPLETION_OUTCOME_HEADING_INDEX,
   CORRECTION_START_LAYOUT,
   INTERMEDIATE_DELTA_BULLET_INDEX,
   INTERMEDIATE_ELAPSED_LINE_INDEX,
@@ -70,7 +71,19 @@ const INTERMEDIATE_FORBIDDEN_SUBJECTS: readonly RegExp[] = [
 const START_PROGRESS_MARKERS: readonly RegExp[] = [/⏱/u, /🔢/u, /ACP 시간/u];
 
 const DELTA_NONE_BULLET = "- Δ0 · 새로 확인된 ACP 결과 없음";
-const DELTA_INCREMENT_PATTERN = /^- Δ\+[1-9][0-9]* \S.*$/u;
+// Current acp-reporting-v3 emits `Δ<N> · <summary>`.  Accept the historical
+// `Δ+<N> <summary>` form only as a bounded migration input; newly built reports
+// use the former and are never rewritten here.
+const DELTA_INCREMENT_PATTERN = /^- Δ[1-9][0-9]* · \S.*$/u;
+const DELTA_INCREMENT_MIGRATION_PATTERN = /^- Δ\+[1-9][0-9]* \S.*$/u;
+
+const TERMINAL_FORBIDDEN_SUBJECTS: readonly RegExp[] = [
+  /(?:^|[^\p{L}\p{N}])\/(?:users|home|tmp|var|etc|opt|srv|proc|private)\//iu,
+  /(?:^|[^\p{L}\p{N}])~\//u,
+  /\b(?:git\s+(?:status|log|diff|show|reflog)|ps\s+(?:aux|-ef|-p)|nohup|disown|setsid)\b/iu,
+  /(?:스케줄러|\bscheduler\b|\bcron\b)/iu,
+  /(?:프로세스|세션)\s*(?:핸들|목록|조회|확인)/u,
+];
 
 function layoutFor(kind: LifecycleKind): readonly CompiledLineSpec[] {
   switch (kind) {
@@ -128,7 +141,8 @@ function validateIntermediateExtras(
   const deltaBullet = lines[INTERMEDIATE_DELTA_BULLET_INDEX];
   if (
     deltaBullet !== DELTA_NONE_BULLET &&
-    !DELTA_INCREMENT_PATTERN.test(deltaBullet ?? "")
+    !DELTA_INCREMENT_PATTERN.test(deltaBullet ?? "") &&
+    !DELTA_INCREMENT_MIGRATION_PATTERN.test(deltaBullet ?? "")
   ) {
     return {
       ok: false,
@@ -145,6 +159,25 @@ function validateIntermediateExtras(
       ok: true,
       advisories: [ReasonCodes.IntermediateLegacyActivityLabel],
     };
+  }
+  return { ok: true };
+}
+
+function validateCompletion(
+  normalized: string,
+  lines: readonly string[],
+): ValidationResult {
+  const structural = validateFixedLayout(lines, COMPILED.completion);
+  if (!structural.ok) return structural;
+  const expectedOutcome = (lines[0] ?? "").startsWith("🏁") ? "✅ **ACP 완료**" :
+    (lines[0] ?? "").startsWith("⛔") ? "⛔ **ACP 취소**" : "❌ **ACP 실패**";
+  if (lines[COMPLETION_OUTCOME_HEADING_INDEX] !== expectedOutcome) {
+    return { ok: false, reasonCode: ReasonCodes.SectionHeadingDrift };
+  }
+  for (const forbidden of TERMINAL_FORBIDDEN_SUBJECTS) {
+    if (forbidden.test(normalized)) {
+      return { ok: false, reasonCode: ReasonCodes.CompletionForbiddenSubject };
+    }
   }
   return { ok: true };
 }
@@ -254,6 +287,6 @@ export function validateLifecycleReport(params: {
     case "correction-start":
       return validateStartFamily(normalized, lines, layoutFor(kind));
     case "completion":
-      return validateFixedLayout(lines, COMPILED.completion);
+      return validateCompletion(normalized, lines);
   }
 }
