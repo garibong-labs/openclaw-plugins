@@ -130,8 +130,11 @@ For a stranded prepared lease, `abort_preactivation` is the explicit recovery
 contract. The owner or exact registered cron job invokes it with the private
 lease token. Only transport-proven atomic preactivation exit releases the
 lease; active, ambiguous, unreadable, or changed transport state stays retained.
-The exact job is removed only after `{ "status":"aborted" }`. The shipped job
-template performs this ordering when it encounters `lease_prepared`. There is
+The exact job must be removed first; only after removal succeeds may the caller
+invoke `abort_preactivation`. If removal fails, abort does not run and the
+prepared lease remains. If abort fails after removal, the job stays removed and
+the prepared lease remains for owner recovery. The shipped job template
+performs this ordering when it encounters `lease_prepared`. There is
 no time-only expiry because a prepared registry record may represent a
 transport that activated just before a failed durable commit.
 
@@ -143,6 +146,17 @@ pending attempt with the same cron session, Discord destination, and account,
 after the trusted policy has consumed that attempt's one-shot publication token.
 No candidate, stale candidate, ambiguous digest, or scope mismatch is guessed.
 Unrelated traffic stays fail-open.
+
+General lifecycle validation continues to normalize CRLF/CR endings, trailing
+newlines, variation selectors, and NFC-equivalent text. Controller publication
+is intentionally stricter: its content-attested pump must return the current
+canonical-builder byte form (NFC, LF-only, no trailing newline, current activity
+label and delta grammar). A normalized or migration-form pump result fails
+closed with `acp_lifecycle_guard.controller.pump_report_noncanonical` before a
+publication token is created. This is required because the transport rebuilds
+the canonical report for acknowledgement and checks the receipt digest against
+those rebuilt bytes; the controller never publishes a byte variant that could
+become unacknowledgeable.
 
 `message_sent` acknowledges only host-proven success for that same full logical
 content and route. OpenClaw 2026.8.1 emits one logical sent event after all
@@ -190,7 +204,9 @@ shell command, static report snapshot, fallback delivery, or prose
 interpretation. It passes only the controller's opaque publication token to
 `message(final:false)`; the trusted policy injects the exact report and route,
 then the script performs one bounded tick. A terminal result removes its exact current job
-and releases only after removal succeeds; every other result stays silent.
+and releases only after removal succeeds. A prepared result follows the same
+fail-safe prefix—remove the exact job first—then requests attested preactivation
+abort. Every other result stays silent.
 
 The host already restricts a cron run's `automations` tool to introspection and
 removal of its own job. The controller independently binds tick and release to

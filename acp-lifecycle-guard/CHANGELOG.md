@@ -6,6 +6,14 @@ plugin is versioned independently of the repository and follows
 
 ## [0.6.0] - 2026-09-03
 
+- Restore fail-safe prepared cleanup ordering: remove the exact automation job
+  before requesting attested preactivation abort, with neither failure inferred
+  as success.
+- Allow authorized terminal and tracking-lost registry release after runtime
+  artifacts disappear, while retaining attestation for abort and all sensitive
+  lifecycle operations.
+- Fail closed before publication when an attested pump returns normalized or
+  migration-form bytes that differ from its canonical builder contract.
 - Declare `acp_report_controller` in `contracts.tools` and verify registration
   through the real OpenClaw 2026.8.1 loader, including the explicit
   `allowConversationAccess` installation grant and its bounded denial state.

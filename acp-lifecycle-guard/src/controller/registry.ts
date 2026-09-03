@@ -478,7 +478,6 @@ export class LeaseRegistry {
   }
 
   release(entry: ControllerLease): void {
-    this.revalidate(entry);
     this.entries.delete(entry.leaseHash);
     try { this.persist(); } catch (error) { this.entries.set(entry.leaseHash, entry); throw error; }
   }
@@ -545,26 +544,31 @@ function pendingScopeMatches(
 }
 
 function parseCanonicalReport(message: string): Record<string, unknown> {
+  // The general lifecycle guard intentionally accepts transport normalization.
+  // Controller traffic is narrower: the attested pump is a canonical builder
+  // and the transport reconstructs those bytes before checking receipt digest.
+  if (message !== message.normalize("NFC") || message.includes("\r") || message.endsWith("\n")) {
+    fail("acp_lifecycle_guard.controller.pump_report_noncanonical");
+  }
   const lines = message.split("\n");
   const identity = /^(?:\uD83E\uDD16) \*\*ACP\*\*: (Claude Code|Codex) · `([^`]+)`$/u.exec(lines[2] ?? "");
   const target = /^\uD83D\uDCCD \*\*작업\*\*: `([^`]+)` · `([^`]+)`$/u.exec(lines[3] ?? "");
   const titleTime = / · ([0-2][0-9]:[0-5][0-9]) KST\*\*$/u.exec(lines[0] ?? "");
-  if (!identity || !target || !titleTime) fail("acp_lifecycle_guard.controller.report_parse_failed");
+  if (!identity || !target || !titleTime) {
+    fail("acp_lifecycle_guard.controller.pump_report_noncanonical");
+  }
   const base = {
     agent: identity[1] === "Codex" ? "codex" : "claude",
     model: identity[2], repository: target[1], branch: target[2], timeKst: titleTime[1],
   };
   if ((lines[0] ?? "").startsWith("🔄")) {
     const round = /^\uD83D\uDD22 \*\*라운드\*\*: ([1-9][0-9]*) · ([1-4])\/4 /u.exec(lines[4] ?? "");
-    // The activity label and the positive-delta grammar each keep one
-    // documented migration form that `validate.ts` still accepts. The parser
-    // must accept exactly the same inputs, or a report the guard passes as
-    // valid would fail its own tick.
-    const elapsed = /^\u23F1\uFE0F? \*\*ACP 시간\*\*: 전체 ([0-9]+)분 · 현재 단계 ([0-9]+)분 · (?:마지막 ACP 활동|마지막 변화) ([0-9]+)분 전$/u.exec(lines[5] ?? "");
+    const elapsed = /^\u23F1\uFE0F? \*\*ACP 시간\*\*: 전체 ([0-9]+)분 · 현재 단계 ([0-9]+)분 · 마지막 ACP 활동 ([0-9]+)분 전$/u.exec(lines[5] ?? "");
     const deltaLine = lines[9] ?? "";
-    const delta = /^- Δ([0-9]+) · (.*)$/u.exec(deltaLine) ??
-      /^- Δ\+([0-9]+) (.*)$/u.exec(deltaLine);
-    if (!round || !elapsed || !delta) fail("acp_lifecycle_guard.controller.report_parse_failed");
+    const delta = /^- Δ([0-9]+) · (.*)$/u.exec(deltaLine);
+    if (!round || !elapsed || !delta) {
+      fail("acp_lifecycle_guard.controller.pump_report_noncanonical");
+    }
     return { ...base, roundIndex: Number(round[1]), phaseIndex: Number(round[2]),
       totalMinutes: Number(elapsed[1]), phaseMinutes: Number(elapsed[2]),
       lastAcpActivityMinutesAgo: Number(elapsed[3]), newResultDelta: Number(delta[1]),
@@ -576,7 +580,9 @@ function parseCanonicalReport(message: string): Record<string, unknown> {
   const duration = /^\u23F1\uFE0F? \*\*ACP 소요\*\*: (.+) · 라운드 ([1-9][0-9]*)$/u.exec(lines[4] ?? "");
   const status = (lines[0] ?? "").startsWith("🏁") ? "completed" :
     (lines[0] ?? "").startsWith("⛔") ? "cancelled" : "failed";
-  if (!duration || lines.length !== 20) fail("acp_lifecycle_guard.controller.report_parse_failed");
+  if (!duration || lines.length !== 20) {
+    fail("acp_lifecycle_guard.controller.pump_report_noncanonical");
+  }
   return { ...base, roundIndex: Number(duration[2]), elapsed: duration[1], status,
     summary: (lines[7] ?? "").slice(2), verification: (lines[10] ?? "").slice(2),
     result: (lines[13] ?? "").slice(2), next: (lines[16] ?? "").slice(2),

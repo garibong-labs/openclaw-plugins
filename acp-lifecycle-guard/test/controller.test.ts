@@ -29,6 +29,19 @@ afterEach(() => {
   delete (globalThis as Record<string, unknown>).__acpControllerAbortInput;
 });
 
+function writePumpModule(pump: string, message: string): void {
+  fs.writeFileSync(pump, [
+    "import crypto from 'node:crypto';",
+    `const message = ${JSON.stringify(message)};`,
+    "export function runReportPump() {",
+    " const status = globalThis.__acpControllerPumpStatus ?? 'delivery_pending';",
+    " if (status !== 'delivery_pending') return { status };",
+    " return { status, message, messageDigest: crypto.createHash('sha256').update(message).digest('hex'),",
+    "  reportId: 'report-example', attemptId: 'attempt-example', fence: 1, cadence: 1, reportKind: 'intermediate' };",
+    "}",
+  ].join("\n"), { mode: 0o644 });
+}
+
 function fixture(): {
   root: string;
   state: string;
@@ -52,16 +65,7 @@ function fixture(): {
     "- Δ1 · 예시 결과 확인",
   );
   const pump = path.join(root, "acp-report-pump.mjs");
-  fs.writeFileSync(pump, [
-    "import crypto from 'node:crypto';",
-    `const message = ${JSON.stringify(message)};`,
-    "export function runReportPump() {",
-    " const status = globalThis.__acpControllerPumpStatus ?? 'delivery_pending';",
-    " if (status !== 'delivery_pending') return { status };",
-    " return { status, message, messageDigest: crypto.createHash('sha256').update(message).digest('hex'),",
-    "  reportId: 'report-example', attemptId: 'attempt-example', fence: 1, cadence: 1, reportKind: 'intermediate' };",
-    "}",
-  ].join("\n"), { mode: 0o644 });
+  writePumpModule(pump, message);
   const host = path.join(root, "acp-host-transport.mjs");
   fs.writeFileSync(host, [
     "export const REPORT_ATTEMPT_TTL_MS = 300000;",
@@ -217,6 +221,30 @@ describe("owner-private persistent lease registry", () => {
     fs.utimesSync(f.pump, before.atime, before.mtime);
     assert.throws(() => registry.revalidate(entry), /trust_changed/u);
   });
+
+  for (const cleanupState of ["terminal_acked", "tracking_lost"] as const) {
+    it(`durably releases ${cleanupState} after the transport artifact disappears`, async () => {
+      const f = fixture();
+      const registry = new LeaseRegistry(f.state);
+      const entry = register(registry, f);
+      await activate(registry, entry);
+      registry.setCleanupState(entry, cleanupState);
+      fs.unlinkSync(f.transport);
+      assert.doesNotThrow(() => registry.release(entry));
+      assert.equal(registry.getByToken("lease-token-example-00000001"), undefined);
+      assert.equal(new LeaseRegistry(f.state).getByToken("lease-token-example-00000001"), undefined);
+    });
+  }
+
+  it("revalidates exact transport proof before aborting and deleting a prepared lease", async () => {
+    const f = fixture();
+    const registry = new LeaseRegistry(f.state);
+    const entry = register(registry, f);
+    fs.unlinkSync(f.transport);
+    await assert.rejects(registry.abortPreactivation(entry), /controller\.path_unavailable/u);
+    assert.equal(registry.getByToken("lease-token-example-00000001"), entry);
+    assert.equal(new LeaseRegistry(f.state).getByToken("lease-token-example-00000001")?.phase, "prepared");
+  });
 });
 
 describe("controller caller and delivery binding", () => {
@@ -240,6 +268,28 @@ describe("controller caller and delivery binding", () => {
     assert.equal(controller.callerMatchesCron(entry, "helper", "agent:main:cron:job-example-1:run:tick-1"), false);
     assert.equal(controller.callerMatchesCron(entry, "main", "agent:main:cron:job-example-2:run:tick-1"), false);
   });
+
+  for (const [label, mutate] of [
+    ["CRLF plus a trailing newline", (message: string) => `${message.replaceAll("\n", "\r\n")}\r\n`],
+    ["NFD-equivalent text", (message: string) => message.normalize("NFD")],
+    ["the legacy activity label", (message: string) => message.replace("마지막 ACP 활동", "마지막 변화")],
+    ["the legacy positive-delta grammar", (message: string) => message.replace("- Δ1 · ", "- Δ+1 ")],
+  ] as const) {
+    it(`fails closed before publication for pump output using ${label}`, async () => {
+      const f = fixture();
+      writePumpModule(f.pump, mutate(f.message));
+      const registry = new LeaseRegistry(f.state);
+      const entry = register(registry, f);
+      await activate(registry, entry);
+      const controller = new ReportController(registry);
+      await assert.rejects(
+        controller.tick(entry, "agent:main:cron:job-example-1:run:tick-1"),
+        /controller\.pump_report_noncanonical/u,
+      );
+      const internals = controller as unknown as { pending: Map<string, unknown> };
+      assert.equal(internals.pending.size, 0);
+    });
+  }
 
   it("authorizes one exact digest/session/job/destination/account candidate and rejects ambiguity", async () => {
     const f = fixture();
@@ -489,6 +539,35 @@ describe("receipt time and lifecycle enforcement", () => {
     assert.equal(surfaces.registry.getByToken("lease-token-example-00000001"), undefined);
   });
 
+  for (const cleanupState of ["terminal_acked", "tracking_lost"] as const) {
+    it(`allows authenticated ${cleanupState} release after transport disappearance`, async () => {
+      const f = fixture();
+      let policy: { evaluate: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown } | undefined;
+      let toolFactory: ((ctx: Record<string, unknown>) => {
+        execute: (id: string, params: unknown) => Promise<Record<string, unknown>> }) | undefined;
+      const api = {
+        id: "acp-lifecycle-guard", logger: { warn: () => {} },
+        runtime: { state: { resolveStateDir: () => f.state } }, on: () => {},
+        registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
+        registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
+      } as unknown as GuardHostApi;
+      const surfaces = createControllerSurfaces(api);
+      const entry = register(surfaces.registry, f);
+      await activate(surfaces.registry, entry);
+      surfaces.registry.setCleanupState(entry, cleanupState);
+      fs.unlinkSync(f.transport);
+      const owner = { toolName: "acp_report_controller", agentId: "main",
+        sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-2",
+        requester: { senderIsOwner: true } };
+      policy!.evaluate({ toolName: "acp_report_controller", toolCallId: `release-${cleanupState}`,
+        params: { action: "release" } }, owner);
+      const released = await toolFactory!(owner).execute(`release-${cleanupState}`,
+        { action: "release", leaseToken: "lease-token-example-00000001" });
+      assert.deepEqual(released.details, { status: "released" });
+      assert.equal(surfaces.registry.getByToken("lease-token-example-00000001"), undefined);
+    });
+  }
+
   it("explicitly denies manual release while a lease is active, including the original owner run", async () => {
     const f = fixture();
     let policy: { evaluate: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown } | undefined;
@@ -506,6 +585,7 @@ describe("receipt time and lifecycle enforcement", () => {
     const owner = { toolName: "acp_report_controller", agentId: "main",
       sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-1",
       requester: { senderIsOwner: true } };
+    fs.unlinkSync(f.transport);
     policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "active-release", params: {} }, owner);
     const result = await toolFactory!(owner).execute("active-release",
       { action: "release", leaseToken: "lease-token-example-00000001" });

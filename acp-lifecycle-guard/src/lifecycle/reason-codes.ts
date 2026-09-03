@@ -95,6 +95,8 @@ export const ReasonCodes = {
   ControllerDigestAmbiguous: `${REASON_CODE_PREFIX}.controller.digest_ambiguous`,
   ControllerScopeMismatch: `${REASON_CODE_PREFIX}.controller.scope_mismatch`,
   ControllerAckFailed: `${REASON_CODE_PREFIX}.controller.ack_failed`,
+  /** Attested pump output is not the exact canonical-builder byte form. */
+  ControllerPumpReportNoncanonical: `${REASON_CODE_PREFIX}.controller.pump_report_noncanonical`,
   LeaseEarlyCompletion: `${REASON_CODE_PREFIX}.controller.early_completion_blocked`,
   LeaseFinalizeBlocked: `${REASON_CODE_PREFIX}.controller.finalize_blocked`,
   LeaseAgentEndViolation: `${REASON_CODE_PREFIX}.controller.agent_end_violation`,
