@@ -32,7 +32,11 @@ async function evaluate(
     return removalResult;
   };
   const run = new AsyncFunction("acp_report_controller", "message", "automations", String(payload.script));
-  await run(controller, message, automations);
+  const result = await run(controller, message, automations);
+  assert.deepEqual(result, {}, "every non-throwing script path must return a bounded object");
+  assert.equal(Object.getPrototypeOf(result), Object.prototype,
+    "the headless result must be a plain object");
+  assert.equal(JSON.stringify(result), "{}", "the headless result must not expose private data");
   return calls;
 }
 
@@ -235,7 +239,7 @@ describe("shipped report controller automation", () => {
     let jobPresent = true;
     let leasePresent = true;
     const run = new AsyncFunction("acp_report_controller", "message", "automations", String(payload.script));
-    await run(
+    const result = await run(
       async (params) => {
         observed.push(String(params.action));
         if (params.action === "tick") {
@@ -250,6 +254,8 @@ describe("shipped report controller automation", () => {
       async () => { observed.push("send"); },
       async () => { observed.push("remove"); jobPresent = false; return { removed: true }; },
     );
+    assert.deepEqual(result, {});
+    assert.equal(Object.getPrototypeOf(result), Object.prototype);
     assert.deepEqual(observed, ["tick", "remove", "abort_preactivation"]);
     assert.equal(jobPresent, false);
     assert.equal(leasePresent, true);

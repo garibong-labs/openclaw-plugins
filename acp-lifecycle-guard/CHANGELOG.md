@@ -6,6 +6,8 @@ plugin is versioned independently of the repository and follows
 
 ## [0.6.1] - 2026-09-04
 
+- Return a bounded object from every successful or intentionally silent report
+  automation path so the OpenClaw scheduler accepts the headless result.
 - Require consistent canonical proof that the exact current automation was
   removed before terminal release or prepared-lease abort. Malformed, absent,
   negative, failure-bearing, and contradictory top-level or wrapped evidence

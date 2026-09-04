@@ -210,7 +210,8 @@ current job and releases only after a strict verifier proves removal from consis
 top-level and plain-object `details` evidence. A prepared result uses that same
 verifier before requesting attested preactivation abort. Absent, malformed,
 negative, failure-bearing, or contradictory removal evidence fails closed.
-Every other result stays silent.
+Every path that does not throw returns an empty object accepted by the scheduler
+result parser; every non-cleanup result stays silent.
 
 The host already restricts a cron run's `automations` tool to introspection and
 removal of its own job. The controller independently binds tick and release to
