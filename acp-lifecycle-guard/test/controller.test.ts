@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { createControllerSurfaces } from "../src/controller/surfaces.ts";
 import {
@@ -17,6 +18,14 @@ import {
 import type { GuardHostApi } from "../src/host-contract.ts";
 import { ReasonCodes } from "../src/lifecycle/reason-codes.ts";
 import { CANONICAL_INTERMEDIATE, replaceLine } from "./fixtures.ts";
+
+const automationTemplatePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
+  "../templates/report-controller-automation.json");
+const automationTemplate = JSON.parse(fs.readFileSync(automationTemplatePath, "utf8")) as
+  { payload: { script: string } };
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
+  new (...args: string[]) => (...values: Array<(...args: unknown[]) => Promise<unknown>>) =>
+    Promise<unknown>;
 
 const roots: string[] = [];
 afterEach(() => {
@@ -493,7 +502,7 @@ describe("receipt time and lifecycle enforcement", () => {
     assert.equal(discordSnowflakeInstant("not-an-id"), undefined);
   });
 
-  it("recovers a lost registration response through the production tool and remains finalizable", async () => {
+  it("survives two lost registration responses and delayed shipped-template ticks before exact replay", async () => {
     const f = fixture();
     const logs: string[] = [];
     let policy: { evaluate: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown } | undefined;
@@ -520,8 +529,63 @@ describe("receipt time and lifecycle enforcement", () => {
       return toolFactory!(owner).execute(id, params);
     };
 
-    await invoke("register-response-lost", registration);
-    const recovered = await invoke("register-exact-replay", registration);
+    const schedulerCalls: Array<{ tool: string; params: Record<string, unknown> }> = [];
+    let jobPresent = true;
+    const cron = { toolName: "acp_report_controller", agentId: "main",
+      sessionKey: "agent:main:cron:job-example-1:run:tick-recovery" };
+    let tickIndex = 0;
+    const runAutomation = new AsyncFunction("acp_report_controller", "message", "automations",
+      automationTemplate.payload.script
+        .replace('"LEASE_TOKEN"', JSON.stringify(registration.leaseToken))
+        .replace('"JOB_ID"', JSON.stringify(registration.jobId)));
+    const delayedTick = async () => {
+      const controller = async (params: unknown) => {
+        const bounded = params as Record<string, unknown>;
+        schedulerCalls.push({ tool: "acp_report_controller", params: structuredClone(bounded) });
+        const id = `delayed-tick-${tickIndex += 1}`;
+        policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id, params: bounded }, cron);
+        const response = await toolFactory!(cron).execute(id, bounded);
+        return response.details;
+      };
+      const result = await runAutomation(
+        controller,
+        async (params: unknown) => {
+          schedulerCalls.push({ tool: "message", params: structuredClone(params as Record<string, unknown>) });
+          return { ok: true };
+        },
+        async (params: unknown) => {
+          schedulerCalls.push({ tool: "automations", params: structuredClone(params as Record<string, unknown>) });
+          jobPresent = false;
+          return { removed: true };
+        },
+      );
+      assert.deepEqual(result, {});
+      assert.equal(Object.getPrototypeOf(result), Object.prototype);
+    };
+
+    // Both successful responses are intentionally discarded to model the
+    // consumer retaining registration_pending after byte-identical calls.
+    await invoke("register-response-lost-first", registration);
+    await delayedTick();
+    await invoke("register-response-lost-second", structuredClone(registration));
+    await delayedTick();
+    await delayedTick();
+    assert.deepEqual(schedulerCalls, [
+      { tool: "acp_report_controller", params: {
+        action: "tick", leaseToken: registration.leaseToken,
+      } },
+      { tool: "acp_report_controller", params: {
+        action: "tick", leaseToken: registration.leaseToken,
+      } },
+      { tool: "acp_report_controller", params: {
+        action: "tick", leaseToken: registration.leaseToken,
+      } },
+    ]);
+    assert.equal(jobPresent, true);
+    assert.equal(surfaces.registry.getByToken(registration.leaseToken)?.phase, "prepared");
+    assert.equal(new LeaseRegistry(f.state).getByToken(registration.leaseToken)?.phase, "prepared");
+
+    const recovered = await invoke("register-exact-replay", structuredClone(registration));
     assert.deepEqual(recovered.details, { status: "prepared" });
     const nonOwner = { ...owner, runId: "owner-run-example-2", requester: { senderIsOwner: false } };
     policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "register-non-owner-replay",
@@ -542,6 +606,8 @@ describe("receipt time and lifecycle enforcement", () => {
     assert.deepEqual((await invoke("commit-recovered", {
       action: "commit_activation", leaseToken: registration.leaseToken,
     })).details, { status: "active" });
+    assert.deepEqual((globalThis as Record<string, unknown>).__acpControllerActivationInput,
+      { transportFile: f.transport, processHandle: registration.processHandle });
     const entry = surfaces.registry.getByToken(registration.leaseToken)!;
     surfaces.registry.setCleanupState(entry, "terminal_acked");
     assert.deepEqual((await invoke("release-recovered", {

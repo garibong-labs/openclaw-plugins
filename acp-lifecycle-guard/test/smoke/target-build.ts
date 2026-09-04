@@ -620,9 +620,8 @@ async function main(): Promise<void> {
     assert.match(automationScript,
       /if \(!await removeCurrentJob\(\)\) return;\n  await acp_report_controller\(\{ action: "release"/u,
       "release must require positively verified removal");
-    assert.match(automationScript,
-      /if \(!await removeCurrentJob\(\)\) return \{\};\n  await acp_report_controller\(\{ action: "abort_preactivation"/u,
-      "prepared abort must require positively verified removal and return an object");
+    assert.doesNotMatch(automationScript, /abort_preactivation/u,
+      "scheduler ticks must not own prepared-lease abort recovery");
     assert.match(String(automationPayload.script),
       /message\(\{ action: "send", message: first\.publicationToken, final: false \}\)/u,
       "automation must expose only the opaque publication token to the message tool call");
@@ -639,6 +638,14 @@ async function main(): Promise<void> {
     assert.deepEqual(scriptResult, {},
       "the shipped automation must return a bounded plain object on a silent path");
     assert.equal(Object.getPrototypeOf(scriptResult), Object.prototype);
+    const preparedResult = await runAutomation(
+      async () => ({ status: "error", code: "acp_lifecycle_guard.controller.lease_prepared" }),
+      async () => { throw new Error("synthetic message call must remain unreachable"); },
+      async () => { throw new Error("synthetic removal call must remain unreachable"); },
+    );
+    assert.deepEqual(preparedResult, {},
+      "the shipped automation must leave prepared recovery inert and scheduler-safe");
+    assert.equal(Object.getPrototypeOf(preparedResult), Object.prototype);
     const parseScriptPayloadResult = await loadInstalledScriptPayloadParser(openclawRoot, workspace);
     assert.deepEqual(parseScriptPayloadResult({ value: scriptResult, output: [] }), {
       kind: "completed",
