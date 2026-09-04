@@ -8,6 +8,7 @@ type Tool = (params: Record<string, unknown>) => Promise<unknown>;
 
 const templatePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
   "../templates/report-controller-automation.json");
+const readmePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../README.md");
 const template = JSON.parse(fs.readFileSync(templatePath, "utf8")) as Record<string, unknown>;
 const payload = template.payload as Record<string, unknown>;
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
@@ -41,6 +42,42 @@ async function evaluate(
 }
 
 describe("shipped report controller automation", () => {
+  it("documents prepared scheduler ticks as inert and owner recovery as coordinator-owned", () => {
+    const readme = fs.readFileSync(readmePath, "utf8");
+    const persistedStart = readme.indexOf("**Persisted prepared lease");
+    const rejectionStart = readme.indexOf("**Proven pre-persistence rejection");
+    const unresolvedStart = readme.indexOf("A thrown, lost, malformed");
+    assert.notEqual(persistedStart, -1);
+    assert.notEqual(rejectionStart, -1);
+    assert.notEqual(unresolvedStart, -1);
+    assert.ok(persistedStart < rejectionStart && rejectionStart < unresolvedStart);
+    const persistedBranch = readme.slice(persistedStart, rejectionStart);
+    const rejectionBranch = readme.slice(rejectionStart, unresolvedStart);
+
+    assert.match(readme,
+      /exact successful order is automation add\/arm,\s+transport prepare, controller `register` \(`prepared`\), transport `activate`,\s+then controller `commit_activation` \(`active`\)/u);
+    assert.match(persistedBranch, /lost registration response recovered\s+as `prepared`/u);
+    assert.match(persistedBranch, /exact-job removal is proven[\s\S]*?controller\s+`abort_preactivation\(\{ leaseToken \}\)`/u);
+    assert.match(persistedBranch,
+      /Only the controller's exact attested\s+preactivation-aborted proof releases that lease/u);
+    assert.match(rejectionBranch, /no controller lease exists/u);
+    assert.match(rejectionBranch,
+      /coordinator first proves exact-job removal, then directly calls the attested\s+`abortHostTransportPreactivation\(\{ transportFile, processHandle \}\)`/u);
+    assert.match(rejectionBranch, /no controller\s+lease to abort, retain, or release/u);
+    assert.doesNotMatch(rejectionBranch,
+      /controller\s+`abort_preactivation|private lease token|prepared lease (?:is )?retained/u);
+    assert.match(readme,
+      /unresolved registration response is\s+not a proven pre-persistence rejection[\s\S]*?byte-identical registration replay/u);
+    assert.match(readme,
+      /Prepared and other error results\s+remain silent and inert:[\s\S]*?return the scheduler-safe plain object `\{\}`/u);
+    assert.match(readme,
+      /persisted prepared-lease cleanup remains in the owner-driven preparation\s+coordinator, while a proven pre-persistence rejection leaves no controller\s+lease and the coordinator directly aborts the attested transport/u);
+    assert.doesNotMatch(readme,
+      /[Aa] prepared result uses that same\s+verifier before requesting attested preactivation abort/u);
+    assert.doesNotMatch(readme,
+      /shipped job template performs this ordering when it encounters\s+`lease_prepared`/u);
+  });
+
   it("is a bounded headless script with an exact tool allowlist and no model fields", () => {
     assert.equal(payload.kind, "script");
     assert.equal(payload.timeoutSeconds, 60);
@@ -104,18 +141,11 @@ describe("shipped report controller automation", () => {
       ["acp_report_controller", "message", "acp_report_controller", "automations", "acp_report_controller"]);
   });
 
-  const cleanupPaths = [
-    {
-      name: "terminal release",
-      result: { status: "terminal_acked", cleanup: "remove_current_job_then_release_lease" },
-      forbiddenAction: "release",
-    },
-    {
-      name: "prepared abort",
-      result: { status: "error", code: "acp_lifecycle_guard.controller.lease_prepared" },
-      forbiddenAction: "abort_preactivation",
-    },
-  ] as const;
+  const cleanupPaths = [{
+    name: "terminal release",
+    result: { status: "terminal_acked", cleanup: "remove_current_job_then_release_lease" },
+    forbiddenAction: "release",
+  }] as const;
 
   const canonicalRemovalEvidence: Array<{ name: string; value: unknown }> = [
     { name: "unwrapped removed", value: { removed: true } },
@@ -205,59 +235,35 @@ describe("shipped report controller automation", () => {
     assert.deepEqual(observed, ["tick", "remove"]);
   });
 
-  it("removes the exact current job before transport-proven prepared recovery", async () => {
+  it("leaves a prepared lease and its exact job recoverable after one scheduler tick", async () => {
     const calls = await evaluate([
       { status: "error", code: "acp_lifecycle_guard.controller.lease_prepared" },
-      { status: "aborted" },
     ]);
     assert.deepEqual(calls, [
       { tool: "acp_report_controller", params: { action: "tick", leaseToken: "LEASE_TOKEN" } },
-      { tool: "automations", params: { action: "remove", jobId: "JOB_ID" } },
-      { tool: "acp_report_controller", params: { action: "abort_preactivation", leaseToken: "LEASE_TOKEN" } },
     ]);
   });
 
-  it("retains the prepared lease and never aborts when exact job removal fails", async () => {
-    const observed: string[] = [];
-    let leasePresent = true;
-    const run = new AsyncFunction("acp_report_controller", "message", "automations", String(payload.script));
-    await assert.rejects(run(
-      async (params) => {
-        observed.push(String(params.action));
-        if (params.action === "abort_preactivation") leasePresent = false;
-        return { status: "error", code: "acp_lifecycle_guard.controller.lease_prepared" };
-      },
-      async () => { observed.push("send"); },
-      async () => { observed.push("remove"); throw new Error("synthetic removal failure"); },
-    ), /synthetic removal failure/u);
-    assert.deepEqual(observed, ["tick", "remove"]);
-    assert.equal(leasePresent, true);
-  });
-
-  it("leaves the job removed and prepared lease retained when attested abort fails", async () => {
+  it("leaves a prepared lease and its exact job recoverable across repeated scheduler ticks", async () => {
     const observed: string[] = [];
     let jobPresent = true;
     let leasePresent = true;
     const run = new AsyncFunction("acp_report_controller", "message", "automations", String(payload.script));
-    const result = await run(
-      async (params) => {
-        observed.push(String(params.action));
-        if (params.action === "tick") {
+    for (let tick = 0; tick < 3; tick += 1) {
+      const result = await run(
+        async (params) => {
+          observed.push(String(params.action));
+          if (params.action === "abort_preactivation") leasePresent = false;
           return { status: "error", code: "acp_lifecycle_guard.controller.lease_prepared" };
-        }
-        const result: Record<string, string> = {
-          status: "error", code: "acp_lifecycle_guard.controller.preactivation_abort_denied",
-        };
-        if (result.status === "aborted") leasePresent = false;
-        return result;
-      },
-      async () => { observed.push("send"); },
-      async () => { observed.push("remove"); jobPresent = false; return { removed: true }; },
-    );
-    assert.deepEqual(result, {});
-    assert.equal(Object.getPrototypeOf(result), Object.prototype);
-    assert.deepEqual(observed, ["tick", "remove", "abort_preactivation"]);
-    assert.equal(jobPresent, false);
+        },
+        async () => { observed.push("send"); },
+        async () => { observed.push("remove"); jobPresent = false; return { removed: true }; },
+      );
+      assert.deepEqual(result, {});
+      assert.equal(Object.getPrototypeOf(result), Object.prototype);
+    }
+    assert.deepEqual(observed, ["tick", "tick", "tick"]);
+    assert.equal(jobPresent, true);
     assert.equal(leasePresent, true);
   });
 });

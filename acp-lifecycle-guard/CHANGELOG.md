@@ -6,6 +6,13 @@ plugin is versioned independently of the repository and follows
 
 ## [0.6.1] - 2026-09-04
 
+- Keep scheduler ticks inert for prepared controller leases so unresolved,
+  byte-identical registration recovery retains the exact job, transport, and
+  lease for owner replay and activation.
+- Document distinct cleanup ownership after proven exact-job removal: a
+  persisted prepared lease uses controller abort, while a proven
+  pre-persistence rejection has no lease and uses direct attested transport
+  abort.
 - Reuse the pump's exact closed-shape structured report through delivery
   acknowledgement instead of reconstructing minute-sensitive fields from its
   rendered message.
@@ -15,9 +22,9 @@ plugin is versioned independently of the repository and follows
 - Return a bounded object from every successful or intentionally silent report
   automation path so the OpenClaw scheduler accepts the headless result.
 - Require consistent canonical proof that the exact current automation was
-  removed before terminal release or prepared-lease abort. Malformed, absent,
-  negative, failure-bearing, and contradictory top-level or wrapped evidence
-  now fails closed through one shared verifier.
+  removed before terminal release. Malformed, absent, negative,
+  failure-bearing, and contradictory top-level or wrapped evidence now fails
+  closed through one shared verifier; prepared and error ticks remain inert.
 
 ## [0.6.0] - 2026-09-03
 

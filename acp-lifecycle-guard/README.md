@@ -123,28 +123,42 @@ Duplicate tokens, jobs, transports, and owner run bindings are rejected. The
 caller cannot supply a job identity to `tick`; the controller derives it from
 the host-authenticated cron session key and compares it with the registration.
 
-The preparation coordinator's exact successful order is automation add,
+The preparation coordinator's exact successful order is automation add/arm,
 transport prepare, controller `register` (`prepared`), transport `activate`,
-then controller `commit_activation` (`active`). Before activation begins, its
-rollback order is automation removal first and `abort_preactivation` second;
-failure to remove the exact job leaves the prepared lease intact. If transport
-activation succeeds but commit does not, neither removal nor abort is safe:
-retain the token privately and retry `commit_activation` from a fresh
-authenticated `main` run in the same canonical owner session.
+then controller `commit_activation` (`active`). Before activation begins,
+cleanup has two distinct ownership branches, both gated on proven removal of
+the exact automation job:
 
-For a stranded prepared lease, `abort_preactivation` is the explicit recovery
-contract. The owner or exact registered cron job invokes it with the private
-lease token. Only transport-proven atomic preactivation exit releases the
-lease; active, ambiguous, unreadable, or changed transport state stays retained.
-The exact job must be removed first; only after its removal response provides
-consistent canonical proof may the caller invoke `abort_preactivation`. If
-removal fails or returns absent, malformed, negative, or contradictory evidence,
-abort does not run and the prepared lease remains. If abort fails after removal,
-the job stays removed and the prepared lease remains for owner recovery. The
-shipped job template performs this ordering when it encounters
-`lease_prepared`. There is no time-only expiry because a prepared registry
-record may represent a transport that activated just before a failed durable
-commit.
+- **Persisted prepared lease (including a lost registration response recovered
+  as `prepared`).** After exact-job removal is proven, the authenticated owner
+  or preparation coordinator calls controller
+  `abort_preactivation({ leaseToken })`. Only the controller's exact attested
+  preactivation-aborted proof releases that lease. If removal is unproven, the
+  lease and job are retained; if abort fails after proven removal, the job stays
+  removed and the prepared lease is retained for owner recovery. Active,
+  ambiguous, unreadable, or changed transport state also retains the lease.
+- **Proven pre-persistence rejection (no controller lease exists).** When
+  `register` is deterministically rejected before persistence, the preparation
+  coordinator first proves exact-job removal, then directly calls the attested
+  `abortHostTransportPreactivation({ transportFile, processHandle })`. This
+  branch cleans up the unregistered prepared transport and has no controller
+  lease to abort, retain, or release.
+
+A thrown, lost, malformed, or otherwise unresolved registration response is
+not a proven pre-persistence rejection. Retain the exact private inputs and job
+for byte-identical registration replay; do not remove, abort, release, activate,
+or commit. If transport activation succeeds but commit does not, neither
+removal nor abort is safe: retain the token privately and retry only
+`commit_activation` from a fresh authenticated `main` run in the same canonical
+owner session.
+
+The shipped scheduler template treats `lease_prepared` as inert. It returns the
+scheduler-safe plain object `{}` without removing the job, aborting or releasing
+the lease, sending a message, activating the transport, or committing
+activation. This preserves an armed job and a possibly persisted prepared lease
+while an owner still holds unresolved registration recovery and can make an
+exact replay. There is no time-only expiry because a prepared registry record
+may represent a transport that activated just before a failed durable commit.
 
 ## Authoritative delivery
 
@@ -215,11 +229,15 @@ interpretation. It passes only the controller's opaque publication token to
 `message(final:false)`; the trusted policy injects the exact report and route,
 then the script performs one bounded tick. A terminal result removes its exact
 current job and releases only after a strict verifier proves removal from consistent
-top-level and plain-object `details` evidence. A prepared result uses that same
-verifier before requesting attested preactivation abort. Absent, malformed,
-negative, failure-bearing, or contradictory removal evidence fails closed.
-Every path that does not throw returns an empty object accepted by the scheduler
-result parser; every non-cleanup result stays silent.
+top-level and plain-object `details` evidence. Prepared and other error results
+remain silent and inert: they do not remove the job or invoke
+`abort_preactivation`, and return the scheduler-safe plain object `{}`. Any
+persisted prepared-lease cleanup remains in the owner-driven preparation
+coordinator, while a proven pre-persistence rejection leaves no controller
+lease and the coordinator directly aborts the attested transport. Absent,
+malformed, negative, failure-bearing, or contradictory removal evidence fails
+closed. Every path that does not throw returns an empty object accepted by the
+scheduler result parser; every non-cleanup result stays silent.
 
 The host already restricts a cron run's `automations` tool to introspection and
 removal of its own job. The controller independently binds tick and release to
