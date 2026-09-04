@@ -12,7 +12,9 @@
  * Phase A - shipped default configuration (`pluginConfig` absent):
  *  1. `dist/index.js` loads against the real `openclaw/plugin-sdk/plugin-entry`,
  *     registers all controller and migration handlers, and exposes exactly one
- *     controller tool plus one scoped trusted-tool policy.
+ *     controller tool plus one scoped trusted-tool policy. The shipped report
+ *     automation's executable result is accepted by the installed scheduler
+ *     parser, while the formerly emitted null result is rejected.
  *  2. A canonical completion report carrying seconds (`17분 31초`) survives the
  *     authoritative guard - the regression this smoke exists for.
  *  3. A malformed lifecycle report is cancelled with the expected reason code.
@@ -276,6 +278,41 @@ function stageTargetBuild(openclawRoot: string): {
     workspace,
     entryUrl: pathToFileURL(path.join(workspace, "dist", "index.js")),
   };
+}
+
+/**
+ * Load the installed scheduler's private result parser without changing the
+ * installation. The pinned bundle is mirrored with symlinks in the disposable
+ * workspace and only its parser symbol is exported from a temporary copy.
+ */
+async function loadInstalledScriptPayloadParser(
+  openclawRoot: string,
+  workspace: string,
+): Promise<(result: Record<string, unknown>) => Record<string, unknown>> {
+  const installedDist = path.join(openclawRoot, "dist");
+  const bundleNames = readdirSync(installedDist).filter((name) => {
+    if (!name.startsWith("server-cron-") || !name.endsWith(".js")) return false;
+    return readFileSync(path.join(installedDist, name), "utf8")
+      .includes("cron script payload must return an object");
+  });
+  assert.equal(bundleNames.length, 1,
+    "installed scheduler result parser bundle must resolve uniquely");
+  const bundleName = bundleNames[0]!;
+  const probeDist = path.join(workspace, "scheduler-parser-probe");
+  mkdirSync(probeDist, { recursive: true });
+  for (const entry of readdirSync(installedDist)) {
+    if (entry === bundleName) continue;
+    symlinkSync(path.join(installedDist, entry), path.join(probeDist, entry));
+  }
+  const installedSource = readFileSync(path.join(installedDist, bundleName), "utf8");
+  const probePath = path.join(probeDist, bundleName);
+  writeFileSync(probePath,
+    `${installedSource}\nexport { parseScriptPayloadResult as __smokeParseScriptPayloadResult };\n`);
+  const probe = await import(pathToFileURL(probePath).href) as Record<string, unknown>;
+  assert.equal(typeof probe.__smokeParseScriptPayloadResult, "function",
+    "installed scheduler result parser probe must export a callable parser");
+  return probe.__smokeParseScriptPayloadResult as
+    (result: Record<string, unknown>) => Record<string, unknown>;
 }
 
 function inspectStagedRuntime(
@@ -574,12 +611,45 @@ async function main(): Promise<void> {
     assert.equal((automationTemplate.delivery as Record<string, unknown>).mode, "none");
     assert.equal(Object.hasOwn(automationPayload, "model"), false);
     assert.equal(Object.hasOwn(automationPayload, "message"), false);
-    assert.match(String(automationPayload.script),
-      /await automations\(\{ action: "remove", jobId \}\);\n  await acp_report_controller/u,
-      "release must follow awaited removal of the authenticated current job");
+    const automationScript = String(automationPayload.script);
+    assert.match(automationScript,
+      /await automations\(\{ action: "remove", jobId \}\)/u,
+      "automation must remove only the authenticated current job");
+    assert.match(automationScript, /const removalProven =/u,
+      "automation must use a deterministic removal verifier");
+    assert.match(automationScript,
+      /if \(!await removeCurrentJob\(\)\) return;\n  await acp_report_controller\(\{ action: "release"/u,
+      "release must require positively verified removal");
+    assert.match(automationScript,
+      /if \(!await removeCurrentJob\(\)\) return \{\};\n  await acp_report_controller\(\{ action: "abort_preactivation"/u,
+      "prepared abort must require positively verified removal and return an object");
     assert.match(String(automationPayload.script),
       /message\(\{ action: "send", message: first\.publicationToken, final: false \}\)/u,
       "automation must expose only the opaque publication token to the message tool call");
+    const AutomationFunction = Object.getPrototypeOf(async function () {}).constructor as
+      new (...args: string[]) => (...values: Array<(...args: unknown[]) => Promise<unknown>>) =>
+        Promise<unknown>;
+    const runAutomation = new AutomationFunction(
+      "acp_report_controller", "message", "automations", automationScript);
+    const scriptResult = await runAutomation(
+      async () => ({ status: "none_due" }),
+      async () => { throw new Error("synthetic message call must remain unreachable"); },
+      async () => { throw new Error("synthetic removal call must remain unreachable"); },
+    );
+    assert.deepEqual(scriptResult, {},
+      "the shipped automation must return a bounded plain object on a silent path");
+    assert.equal(Object.getPrototypeOf(scriptResult), Object.prototype);
+    const parseScriptPayloadResult = await loadInstalledScriptPayloadParser(openclawRoot, workspace);
+    assert.deepEqual(parseScriptPayloadResult({ value: scriptResult, output: [] }), {
+      kind: "completed",
+      stateChanged: false,
+    }, "the installed scheduler parser must accept the shipped headless result");
+    assert.deepEqual(parseScriptPayloadResult({ value: null, output: [] }), {
+      kind: "error",
+      code: "internal_error",
+      error: "cron script payload must return an object",
+    }, "the installed scheduler parser must reject the former null headless result");
+    record("installed scheduler parser accepts the shipped bounded result and rejects null");
 
     let runner = initRunner(defaultRegistration.typedHooks, [PLUGIN_ID]);
     assert.ok(runner, "global hook runner is available");
