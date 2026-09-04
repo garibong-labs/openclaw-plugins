@@ -4,6 +4,13 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-04
+
+- Require consistent canonical proof that the exact current automation was
+  removed before terminal release or prepared-lease abort. Malformed, absent,
+  negative, failure-bearing, and contradictory top-level or wrapped evidence
+  now fails closed through one shared verifier.
+
 ## [0.6.0] - 2026-09-03
 
 - Restore fail-safe prepared cleanup ordering: remove the exact automation job

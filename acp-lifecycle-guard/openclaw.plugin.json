@@ -2,7 +2,7 @@
   "id": "acp-lifecycle-guard",
   "name": "ACP Lifecycle Guard",
   "description": "Validates ACP lifecycle reports and runs a durable, fenced report-delivery controller.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "activation": {
     "onStartup": true,
     "onCapabilities": ["hook"]

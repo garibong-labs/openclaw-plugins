@@ -574,9 +574,15 @@ async function main(): Promise<void> {
     assert.equal((automationTemplate.delivery as Record<string, unknown>).mode, "none");
     assert.equal(Object.hasOwn(automationPayload, "model"), false);
     assert.equal(Object.hasOwn(automationPayload, "message"), false);
-    assert.match(String(automationPayload.script),
-      /await automations\(\{ action: "remove", jobId \}\);\n  await acp_report_controller/u,
-      "release must follow awaited removal of the authenticated current job");
+    const automationScript = String(automationPayload.script);
+    assert.match(automationScript,
+      /await automations\(\{ action: "remove", jobId \}\)/u,
+      "automation must remove only the authenticated current job");
+    assert.match(automationScript, /const removalProven =/u,
+      "automation must use a deterministic removal verifier");
+    assert.equal(automationScript.match(
+      /if \(!await removeCurrentJob\(\)\) return;\n  await acp_report_controller/gu)?.length, 2,
+      "release and prepared abort must both require positively verified removal");
     assert.match(String(automationPayload.script),
       /message\(\{ action: "send", message: first\.publicationToken, final: false \}\)/u,
       "automation must expose only the opaque publication token to the message tool call");

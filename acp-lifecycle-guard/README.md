@@ -130,13 +130,15 @@ For a stranded prepared lease, `abort_preactivation` is the explicit recovery
 contract. The owner or exact registered cron job invokes it with the private
 lease token. Only transport-proven atomic preactivation exit releases the
 lease; active, ambiguous, unreadable, or changed transport state stays retained.
-The exact job must be removed first; only after removal succeeds may the caller
-invoke `abort_preactivation`. If removal fails, abort does not run and the
-prepared lease remains. If abort fails after removal, the job stays removed and
-the prepared lease remains for owner recovery. The shipped job template
-performs this ordering when it encounters `lease_prepared`. There is
-no time-only expiry because a prepared registry record may represent a
-transport that activated just before a failed durable commit.
+The exact job must be removed first; only after its removal response provides
+consistent canonical proof may the caller invoke `abort_preactivation`. If
+removal fails or returns absent, malformed, negative, or contradictory evidence,
+abort does not run and the prepared lease remains. If abort fails after removal,
+the job stays removed and the prepared lease remains for owner recovery. The
+shipped job template performs this ordering when it encounters
+`lease_prepared`. There is no time-only expiry because a prepared registry
+record may represent a transport that activated just before a failed durable
+commit.
 
 ## Authoritative delivery
 
@@ -203,10 +205,12 @@ five-call budget, and an exact three-tool allowlist. It has no model fields,
 shell command, static report snapshot, fallback delivery, or prose
 interpretation. It passes only the controller's opaque publication token to
 `message(final:false)`; the trusted policy injects the exact report and route,
-then the script performs one bounded tick. A terminal result removes its exact current job
-and releases only after removal succeeds. A prepared result follows the same
-fail-safe prefix—remove the exact job first—then requests attested preactivation
-abort. Every other result stays silent.
+then the script performs one bounded tick. A terminal result removes its exact
+current job and releases only after a strict verifier proves removal from consistent
+top-level and plain-object `details` evidence. A prepared result uses that same
+verifier before requesting attested preactivation abort. Absent, malformed,
+negative, failure-bearing, or contradictory removal evidence fails closed.
+Every other result stays silent.
 
 The host already restricts a cron run's `automations` tool to introspection and
 removal of its own job. The controller independently binds tick and release to
