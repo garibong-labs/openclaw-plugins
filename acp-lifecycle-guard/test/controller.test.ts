@@ -27,17 +27,31 @@ afterEach(() => {
   delete (globalThis as Record<string, unknown>).__acpControllerAbort;
   delete (globalThis as Record<string, unknown>).__acpControllerActivationInput;
   delete (globalThis as Record<string, unknown>).__acpControllerAbortInput;
+  delete (globalThis as Record<string, unknown>).__acpControllerExactReport;
 });
 
-function writePumpModule(pump: string, message: string): void {
+function canonicalPumpReport(): Record<string, unknown> {
+  return {
+    agent: "codex", model: "example-model-1", roundIndex: 1,
+    repository: "example-repo", branch: "feat/example", timeKst: "14:20",
+    phaseIndex: 2, totalMinutes: 20, phaseMinutes: 8, lastAcpActivityMinutesAgo: 2,
+    newResultDelta: 1, newResult: "예시 결과 확인", executionState: "ACP 프롬프트 실행 중",
+    inProgress: "정책 모듈 구현 3/5", verification: "아직 실행 전",
+    next: "남은 게이트 2개 · 검증 실행",
+  };
+}
+
+function writePumpModule(pump: string, message: string, report = canonicalPumpReport()): void {
   fs.writeFileSync(pump, [
     "import crypto from 'node:crypto';",
     `const message = ${JSON.stringify(message)};`,
+    `const report = Object.freeze(${JSON.stringify(report)});`,
+    "globalThis.__acpControllerExactReport = report;",
     "export function runReportPump() {",
     " const status = globalThis.__acpControllerPumpStatus ?? 'delivery_pending';",
     " if (status !== 'delivery_pending') return { status };",
     " return { status, message, messageDigest: crypto.createHash('sha256').update(message).digest('hex'),",
-    "  reportId: 'report-example', attemptId: 'attempt-example', fence: 1, cadence: 1, reportKind: 'intermediate' };",
+    "  reportId: 'report-example', attemptId: 'attempt-example', fence: 1, cadence: 1, reportKind: 'intermediate', report };",
     "}",
   ].join("\n"), { mode: 0o644 });
 }
@@ -134,11 +148,40 @@ describe("owner-private persistent lease registry", () => {
     assert.equal(reloaded.getByToken("lease-token-example-00000001")?.cleanupState, null);
   });
 
-  it("rejects duplicates, symlinks, and insecure private files", () => {
+  it("recovers an exact persisted registration replay without another lease or capacity use", () => {
+    const f = fixture();
+    const firstRegistry = new LeaseRegistry(f.state);
+    const first = register(firstRegistry, f);
+    const persistedBeforeReplay = fs.readFileSync(firstRegistry.file, "utf8");
+
+    // A new registry instance models a caller losing the first successful
+    // response and retrying only after the durable write has completed.
+    const recoveredRegistry = new LeaseRegistry(f.state);
+    const recovered = register(recoveredRegistry, f);
+    assert.deepEqual(recovered, first);
+    assert.equal(fs.readFileSync(recoveredRegistry.file, "utf8"), persistedBeforeReplay);
+    const document = JSON.parse(persistedBeforeReplay) as { leases: unknown[] };
+    assert.equal(document.leases.length, 1);
+
+    const alternate = fixture();
+    for (const overrides of [
+      { leaseToken: "lease-token-example-00000002" },
+      { processHandle: "process-example-mismatch" },
+      { jobId: "job-example-mismatch" },
+      { ownerRunId: "owner-run-example-mismatch" },
+      { ownerSessionKey: "agent:main:discord:example-owner-mismatch" },
+      { transportFile: alternate.transport },
+      { destination: { channel: "discord" as const, accountId: "account-mismatch", conversationId: "2" } },
+    ]) {
+      assert.throws(() => register(recoveredRegistry, f, overrides), /controller\.duplicate/u);
+    }
+  });
+
+  it("rejects mismatched duplicates, symlinks, and insecure private files", () => {
     const f = fixture();
     const registry = new LeaseRegistry(f.state);
     register(registry, f);
-    assert.throws(() => register(registry, f), /controller\.duplicate/u);
+    assert.throws(() => register(registry, f, { jobId: "job-example-mismatch" }), /controller\.duplicate/u);
 
     const second = fixture();
     fs.chmodSync(second.transport, 0o644);
@@ -202,6 +245,10 @@ describe("owner-private persistent lease registry", () => {
         jobId: `job-example-${index + 1}`,
       });
     }
+    assert.doesNotThrow(() => register(registry, first),
+      "an exact replay must recover even when the owner is at capacity");
+    const persisted = JSON.parse(fs.readFileSync(registry.file, "utf8")) as { leases: unknown[] };
+    assert.equal(persisted.leases.length, MAX_PREPARED_LEASES_PER_OWNER);
     const overflow = fixture();
     assert.throws(() => register(registry, overflow, {
       leaseToken: "lease-token-example-00000099",
@@ -291,6 +338,21 @@ describe("controller caller and delivery binding", () => {
     });
   }
 
+  it("fails closed before publication when the pump report is not an exact bounded shape", async () => {
+    const f = fixture();
+    writePumpModule(f.pump, f.message, { ...canonicalPumpReport(), unexpected: "synthetic" });
+    const registry = new LeaseRegistry(f.state);
+    const entry = register(registry, f);
+    await activate(registry, entry);
+    const controller = new ReportController(registry);
+    await assert.rejects(
+      controller.tick(entry, "agent:main:cron:job-example-1:run:tick-1"),
+      /controller\.pump_report_invalid/u,
+    );
+    const internals = controller as unknown as { pending: Map<string, unknown> };
+    assert.equal(internals.pending.size, 0);
+  });
+
   it("authorizes one exact digest/session/job/destination/account candidate and rejects ambiguity", async () => {
     const f = fixture();
     const registry = new LeaseRegistry(f.state);
@@ -351,7 +413,7 @@ describe("controller caller and delivery binding", () => {
     }), "authorized");
   });
 
-  it("acknowledges one successful logical multipart send with its canonical message id", async () => {
+  it("acknowledges with the exact pump report without reconstructing minute fields", async () => {
     const f = fixture();
     const registry = new LeaseRegistry(f.state);
     const entry = register(registry, f);
@@ -369,6 +431,17 @@ describe("controller caller and delivery binding", () => {
     const messageId = (BigInt(instant - 1420070400000) << 22n).toString();
     assert.equal(await controller.acknowledgeSent({ content: f.message, success: true, messageId }, context), "acked");
     const ack = (globalThis as Record<string, unknown>).__acpControllerAck as Record<string, unknown>;
+    assert.strictEqual(ack.report,
+      (globalThis as Record<string, unknown>).__acpControllerExactReport,
+      "the production tick/send/ack path must retain the pump's exact structured report");
+    assert.deepEqual(ack.report, {
+      agent: "codex", model: "example-model-1", roundIndex: 1,
+      repository: "example-repo", branch: "feat/example", timeKst: "14:20",
+      phaseIndex: 2, totalMinutes: 20, phaseMinutes: 8, lastAcpActivityMinutesAgo: 2,
+      newResultDelta: 1, newResult: "예시 결과 확인", executionState: "ACP 프롬프트 실행 중",
+      inProgress: "정책 모듈 구현 3/5", verification: "아직 실행 전",
+      next: "남은 게이트 2개 · 검증 실행",
+    });
     assert.equal((ack.receipt as Record<string, unknown>).messageId, messageId);
     assert.equal((ack.receipt as Record<string, unknown>).deliveredAt, new Date(instant).toISOString());
   });
@@ -418,6 +491,63 @@ describe("receipt time and lifecycle enforcement", () => {
     const snowflake = (BigInt(instant - 1420070400000) << 22n).toString();
     assert.equal(discordSnowflakeInstant(snowflake), new Date(instant).toISOString());
     assert.equal(discordSnowflakeInstant("not-an-id"), undefined);
+  });
+
+  it("recovers a lost registration response through the production tool and remains finalizable", async () => {
+    const f = fixture();
+    const logs: string[] = [];
+    let policy: { evaluate: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown } | undefined;
+    let toolFactory: ((ctx: Record<string, unknown>) => {
+      execute: (id: string, params: unknown) => Promise<Record<string, unknown>> }) | undefined;
+    const api = {
+      id: "acp-lifecycle-guard", logger: { warn: (line: unknown) => logs.push(String(line)) },
+      runtime: { state: { resolveStateDir: () => f.state } }, on: () => {},
+      registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
+      registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
+    } as unknown as GuardHostApi;
+    const surfaces = createControllerSurfaces(api);
+    const owner = { toolName: "acp_report_controller", agentId: "main",
+      sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-1",
+      requester: { senderIsOwner: true } };
+    const registration = {
+      action: "register", leaseToken: "lease-token-example-00000001", transportFile: f.transport,
+      processHandle: "process-example-1", jobId: "job-example-1",
+      destination: { channel: "discord", accountId: "account-example", conversationId: "1" },
+      reportPumpEntry: f.pump, hostTransportEntry: f.host,
+    };
+    const invoke = async (id: string, params: Record<string, unknown>) => {
+      policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id, params }, owner);
+      return toolFactory!(owner).execute(id, params);
+    };
+
+    await invoke("register-response-lost", registration);
+    const recovered = await invoke("register-exact-replay", registration);
+    assert.deepEqual(recovered.details, { status: "prepared" });
+    const nonOwner = { ...owner, runId: "owner-run-example-2", requester: { senderIsOwner: false } };
+    policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "register-non-owner-replay",
+      params: registration }, nonOwner);
+    const denied = await toolFactory!(nonOwner).execute("register-non-owner-replay", registration);
+    assert.equal((denied.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
+    const serialized = JSON.stringify(recovered);
+    for (const privateValue of [registration.leaseToken, registration.transportFile,
+      owner.sessionKey, owner.runId, registration.processHandle, registration.jobId]) {
+      assert.equal(serialized.includes(String(privateValue)), false);
+      assert.equal(logs.some((line) => line.includes(String(privateValue))), false);
+    }
+    const document = JSON.parse(fs.readFileSync(surfaces.registry.file, "utf8")) as { leases: unknown[] };
+    assert.equal(document.leases.length, 1);
+    assert.equal(surfaces.beforeAgentFinalize({ sessionId: "example", stopHookActive: false }, owner)?.action,
+      "revise");
+
+    assert.deepEqual((await invoke("commit-recovered", {
+      action: "commit_activation", leaseToken: registration.leaseToken,
+    })).details, { status: "active" });
+    const entry = surfaces.registry.getByToken(registration.leaseToken)!;
+    surfaces.registry.setCleanupState(entry, "terminal_acked");
+    assert.deepEqual((await invoke("release-recovered", {
+      action: "release", leaseToken: registration.leaseToken,
+    })).details, { status: "released" });
+    assert.equal(surfaces.beforeAgentFinalize({ sessionId: "example", stopHookActive: false }, owner), undefined);
   });
 
   it("blocks cross-agent controller calls, final/yield, revises finalize, and logs agent_end content-free", async () => {
