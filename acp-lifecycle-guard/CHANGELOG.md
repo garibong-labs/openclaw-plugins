@@ -6,6 +6,12 @@ plugin is versioned independently of the repository and follows
 
 ## [0.6.1] - 2026-09-04
 
+- Reuse the pump's exact closed-shape structured report through delivery
+  acknowledgement instead of reconstructing minute-sensitive fields from its
+  rendered message.
+- Make an exact prepared-registration replay recover the already persisted
+  result without consuming capacity, while every identity or input mismatch
+  remains denied.
 - Return a bounded object from every successful or intentionally silent report
   automation path so the OpenClaw scheduler accepts the headless result.
 - Require consistent canonical proof that the exact current automation was

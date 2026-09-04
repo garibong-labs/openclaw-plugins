@@ -342,16 +342,6 @@ export class LeaseRegistry {
         !SAFE_HANDLE.test(input.processHandle) || !SAFE_JOB.test(input.jobId)) {
       fail("acp_lifecycle_guard.controller.identity_invalid");
     }
-    const preparedForOwner = [...this.entries.values()]
-      .filter((entry) => entry.phase === "prepared" && entry.ownerSessionKey === input.ownerSessionKey)
-      .sort((left, right) => Date.parse(left.registeredAt) - Date.parse(right.registeredAt));
-    if (preparedForOwner.length >= MAX_PREPARED_LEASES_PER_OWNER) {
-      // Never delete by age alone: the oldest timestamp only makes the cap
-      // deterministic. Recovery still requires abortPreactivation's attested
-      // transport proof under exact owner/job authority.
-      fail("acp_lifecycle_guard.controller.prepared_recovery_required");
-    }
-    if (this.entries.size >= MAX_ACTIVE_LEASES) fail("acp_lifecycle_guard.controller.registry_full");
     const transportFile = assertOwnedRegularFile(input.transportFile, { privateFile: true });
     const reportPumpEntry = assertOwnedRegularFile(input.reportPumpEntry, {
       privateFile: false, basename: "acp-report-pump.mjs",
@@ -364,7 +354,36 @@ export class LeaseRegistry {
     }
     const snapshotFile = input.snapshotFile === undefined ? undefined :
       assertOwnedRegularFile(input.snapshotFile, { privateFile: true });
-    if (this.entries.has(hash) || [...this.entries.values()].some((entry) =>
+    const destination = validateDestination(input.destination);
+    const existing = this.entries.get(hash);
+    if (existing !== undefined) {
+      const sameSnapshot = existing.snapshotFile === undefined
+        ? snapshotFile === undefined
+        : snapshotFile !== undefined && sameAttestation(existing.snapshotFile, snapshotFile);
+      const exactReplay = existing.phase === "prepared" && existing.cleanupState === null &&
+        existing.ownerSessionKey === input.ownerSessionKey && existing.ownerRunId === input.ownerRunId &&
+        existing.processHandle === input.processHandle && existing.jobId === input.jobId &&
+        existing.destination.channel === destination.channel &&
+        existing.destination.accountId === destination.accountId &&
+        existing.destination.conversationId === destination.conversationId &&
+        sameAttestation(existing.transportFile, transportFile) &&
+        sameAttestation(existing.reportPumpEntry, reportPumpEntry) &&
+        sameAttestation(existing.hostTransportEntry, hostTransportEntry) && sameSnapshot;
+      if (exactReplay) return existing;
+      fail("acp_lifecycle_guard.controller.duplicate");
+    }
+    const preparedForOwner = [...this.entries.values()]
+      .filter((entry) => entry.phase === "prepared" && entry.ownerSessionKey === input.ownerSessionKey)
+      .sort((left, right) => Date.parse(left.registeredAt) - Date.parse(right.registeredAt));
+    if (preparedForOwner.length >= MAX_PREPARED_LEASES_PER_OWNER) {
+      // Never delete by age alone: the oldest timestamp only makes the cap
+      // deterministic. Recovery still requires abortPreactivation's attested
+      // transport proof under exact owner/job authority. An exact replay was
+      // already recovered above and consumes no additional capacity.
+      fail("acp_lifecycle_guard.controller.prepared_recovery_required");
+    }
+    if (this.entries.size >= MAX_ACTIVE_LEASES) fail("acp_lifecycle_guard.controller.registry_full");
+    if ([...this.entries.values()].some((entry) =>
       entry.jobId === input.jobId || entry.transportFile.path === transportFile.path ||
       (entry.ownerSessionKey === input.ownerSessionKey && entry.ownerRunId === input.ownerRunId))) {
       fail("acp_lifecycle_guard.controller.duplicate");
@@ -377,7 +396,7 @@ export class LeaseRegistry {
       transportFile,
       processHandle: input.processHandle,
       jobId: input.jobId,
-      destination: validateDestination(input.destination),
+      destination,
       reportPumpEntry,
       hostTransportEntry,
       ...(snapshotFile === undefined ? {} : { snapshotFile }),
@@ -543,7 +562,7 @@ function pendingScopeMatches(
     entry.destination.conversationId === context.conversationId;
 }
 
-function parseCanonicalReport(message: string): Record<string, unknown> {
+function assertCanonicalReportMessage(message: string): void {
   // The general lifecycle guard intentionally accepts transport normalization.
   // Controller traffic is narrower: the attested pump is a canonical builder
   // and the transport reconstructs those bytes before checking receipt digest.
@@ -557,10 +576,6 @@ function parseCanonicalReport(message: string): Record<string, unknown> {
   if (!identity || !target || !titleTime) {
     fail("acp_lifecycle_guard.controller.pump_report_noncanonical");
   }
-  const base = {
-    agent: identity[1] === "Codex" ? "codex" : "claude",
-    model: identity[2], repository: target[1], branch: target[2], timeKst: titleTime[1],
-  };
   if ((lines[0] ?? "").startsWith("🔄")) {
     const round = /^\uD83D\uDD22 \*\*라운드\*\*: ([1-9][0-9]*) · ([1-4])\/4 /u.exec(lines[4] ?? "");
     const elapsed = /^\u23F1\uFE0F? \*\*ACP 시간\*\*: 전체 ([0-9]+)분 · 현재 단계 ([0-9]+)분 · 마지막 ACP 활동 ([0-9]+)분 전$/u.exec(lines[5] ?? "");
@@ -569,24 +584,91 @@ function parseCanonicalReport(message: string): Record<string, unknown> {
     if (!round || !elapsed || !delta) {
       fail("acp_lifecycle_guard.controller.pump_report_noncanonical");
     }
-    return { ...base, roundIndex: Number(round[1]), phaseIndex: Number(round[2]),
-      totalMinutes: Number(elapsed[1]), phaseMinutes: Number(elapsed[2]),
-      lastAcpActivityMinutesAgo: Number(elapsed[3]), newResultDelta: Number(delta[1]),
-      ...(Number(delta[1]) > 0 ? { newResult: delta[2] } : {}),
-      executionState: (lines[6] ?? "").replace(/^\uD83D\uDD01 \*\*실행 상태\*\*: /u, ""),
-      inProgress: (lines[12] ?? "").slice(2), verification: (lines[15] ?? "").slice(2),
-      next: (lines[18] ?? "").slice(2), ...(lines.length === 22 ? { issue: (lines[21] ?? "").slice(2) } : {}) };
+    return;
   }
   const duration = /^\u23F1\uFE0F? \*\*ACP 소요\*\*: (.+) · 라운드 ([1-9][0-9]*)$/u.exec(lines[4] ?? "");
-  const status = (lines[0] ?? "").startsWith("🏁") ? "completed" :
-    (lines[0] ?? "").startsWith("⛔") ? "cancelled" : "failed";
   if (!duration || lines.length !== 20) {
     fail("acp_lifecycle_guard.controller.pump_report_noncanonical");
   }
-  return { ...base, roundIndex: Number(duration[2]), elapsed: duration[1], status,
-    summary: (lines[7] ?? "").slice(2), verification: (lines[10] ?? "").slice(2),
-    result: (lines[13] ?? "").slice(2), next: (lines[16] ?? "").slice(2),
-    externalAction: (lines[19] ?? "").slice(2) };
+}
+
+const REPORT_IDENTITY_KEYS = ["agent", "model", "roundIndex", "repository", "branch", "timeKst"];
+const INTERMEDIATE_REPORT_KEYS = [...REPORT_IDENTITY_KEYS, "phaseIndex", "totalMinutes", "phaseMinutes",
+  "lastAcpActivityMinutesAgo", "newResultDelta", "executionState", "inProgress", "verification", "next"];
+const TERMINAL_REPORT_KEYS = [...REPORT_IDENTITY_KEYS, "elapsed", "status", "summary", "verification",
+  "result", "next", "externalAction"];
+const REPORT_SINGLE_LINE = /^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]{1,2000}$/u;
+
+function exactPlainDataObject(value: unknown, required: string[], optional: string[] = []):
+  value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  if (Object.getOwnPropertySymbols(value).length !== 0) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key)) &&
+    keys.every((key) => required.includes(key) || optional.includes(key)) &&
+    Object.keys(descriptors).length === keys.length &&
+    Object.values(descriptors).every((descriptor) =>
+      descriptor.enumerable === true && Object.hasOwn(descriptor, "value"));
+}
+
+function validReportString(value: unknown): value is string {
+  return typeof value === "string" && value === value.normalize("NFC") && REPORT_SINGLE_LINE.test(value);
+}
+
+function validReportIdentity(value: Record<string, unknown>): boolean {
+  const repository = value.repository;
+  const branch = value.branch;
+  return validReportString(value.model) && value.model.length <= 256 && !value.model.includes("`") &&
+    typeof repository === "string" && repository.length <= 100 &&
+    /^[A-Za-z0-9._-]+$/u.test(repository) && repository !== "." && repository !== ".." &&
+    typeof branch === "string" && branch.length <= 200 &&
+    !/[\s\u0000-\u001f\u007f-\u009f\\~^:?*[\]`]/u.test(branch) &&
+    !branch.includes("..") && !branch.includes("@{") && !branch.startsWith("/") &&
+    !branch.endsWith("/") && !branch.includes("//") && !branch.endsWith(".") &&
+    !branch.split("/").some((part) => part.endsWith(".lock"));
+}
+
+function boundedInteger(value: unknown, minimum: number, maximum: number): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum;
+}
+
+function validateStructuredReport(value: unknown, kind: "intermediate" | "terminal"):
+  Record<string, unknown> {
+  const required = kind === "intermediate" ? INTERMEDIATE_REPORT_KEYS : TERMINAL_REPORT_KEYS;
+  const optional = kind === "intermediate" ? ["newResult", "issue"] : [];
+  if (!exactPlainDataObject(value, required, optional) ||
+      !["claude", "codex"].includes(value.agent as string) ||
+      !boundedInteger(value.roundIndex, 1, 1000) ||
+      typeof value.timeKst !== "string" || !/^([01][0-9]|2[0-3]):[0-5][0-9]$/u.test(value.timeKst) ||
+      !validReportIdentity(value)) {
+    fail("acp_lifecycle_guard.controller.pump_report_invalid");
+  }
+  if (kind === "intermediate") {
+    if (!boundedInteger(value.phaseIndex, 1, 4) ||
+        !boundedInteger(value.totalMinutes, 0, 99999) ||
+        !boundedInteger(value.phaseMinutes, 0, 99999) ||
+        !boundedInteger(value.lastAcpActivityMinutesAgo, 0, 99999) ||
+        !boundedInteger(value.newResultDelta, 0, 9999) ||
+        (value.phaseMinutes as number) > (value.totalMinutes as number) ||
+        (value.lastAcpActivityMinutesAgo as number) > (value.totalMinutes as number) ||
+        ![value.executionState, value.inProgress, value.verification, value.next].every(validReportString) ||
+        (value.issue !== undefined && !validReportString(value.issue)) ||
+        ((value.newResultDelta as number) === 0) !== (value.newResult === undefined) ||
+        (value.newResult !== undefined && !validReportString(value.newResult))) {
+      fail("acp_lifecycle_guard.controller.pump_report_invalid");
+    }
+  } else if (!["completed", "cancelled", "failed"].includes(value.status as string) ||
+      ![value.elapsed, value.summary, value.verification, value.result, value.next, value.externalAction]
+        .every(validReportString)) {
+    fail("acp_lifecycle_guard.controller.pump_report_invalid");
+  }
+  if (Buffer.byteLength(JSON.stringify(value), "utf8") > 8192) {
+    fail("acp_lifecycle_guard.controller.pump_report_invalid");
+  }
+  return value;
 }
 
 export class ReportController {
@@ -662,13 +744,15 @@ export class ReportController {
         (result.reportKind !== "intermediate" && result.reportKind !== "terminal")) {
       fail("acp_lifecycle_guard.controller.pump_result_invalid");
     }
+    assertCanonicalReportMessage(result.message);
+    const report = validateStructuredReport(result.report, result.reportKind);
     const publicationToken = `acp-pub-${crypto.randomUUID().replaceAll("-", "")}`;
     this.pending.set(entry.leaseHash, {
       leaseHash: entry.leaseHash, cronSessionKey: sessionKey,
       messageDigest: result.messageDigest,
       publicationTokenHash: leaseHash(publicationToken),
       message: result.message,
-      report: parseCanonicalReport(result.message),
+      report,
       reportId: result.reportId, reportKind: result.reportKind,
       cadence: result.cadence as number, attemptId: result.attemptId,
       fence: result.fence as number, injected: false, authorized: false,

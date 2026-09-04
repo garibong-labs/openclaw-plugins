@@ -99,6 +99,12 @@ are exactly `{ "status":"prepared" }`, `{ "status":"active" }`, and
 `{ "status":"aborted" }`. `status` returns `prepared` or `active`, or the
 existing terminal cleanup shape.
 
+If a successful `register` response is lost, replaying the exact same prepared
+registration returns the same bounded result without creating another lease or
+using more capacity. Recovery compares the token, owner session and run, job,
+transport, destination, process, attested entries, and optional snapshot; any
+mismatch or replay after the lease changes phase fails closed.
+
 The lease token is hashed before persistence and is never logged or returned. The
 registry lives below OpenClaw's state directory, uses a `0700` directory and a
 `0600` atomically replaced file, and is capped at 64 prepared/active leases.
@@ -166,8 +172,10 @@ chunks settle; its canonical message id is the last provider message id for a
 multipart delivery. A partial delivery emits failure and is never accepted.
 For Discord the controller derives `deliveredAt` from the snowflake when the
 hook has no provider timestamp, then calls the attested transport's fenced
-`acknowledgeHostTransportReport` with private state retained in memory. None of
-those values appears in public content, hook metadata, or logs.
+`acknowledgeHostTransportReport` with the exact closed-shape structured report
+returned by the pump and private state retained in memory. It never reconstructs
+minute-sensitive fields from rendered text. None of those values appears in
+public content, hook metadata, or logs.
 
 Failed sends, uncertain delivery, expired/stale fences, acknowledgement errors,
 and pump errors retain the durable lease. A host failure without a message ID
