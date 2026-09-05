@@ -41,10 +41,15 @@ this package never edits live configuration or restarts services.
 
 The controller exposes six closed actions through one plugin tool:
 
-- `register`: main-owner only. Binds an opaque lease token to the exact owner
-  session/run, ACP transport file and process handle, report-pump job,
-  Discord conversation/account, and attested skills pump/transport entries.
-  It persists the lease in `prepared`; registration never authorizes a pump.
+- `register`: main-owner only. The trusted tool requester may prove ownership
+  directly. When a bridged tool call omits that optional requester bit, the
+  controller accepts only a host-proven `before_agent_run` owner admission
+  bound to the exact `main` agent, session, and run; an explicit non-owner bit
+  is never overridden, and the bridge is revoked at `agent_end`. Registration
+  binds an opaque lease token to the exact owner session/run, ACP transport file
+  and process handle, report-pump job, Discord conversation/account, and
+  attested skills pump/transport entries. It persists the lease in `prepared`;
+  registration never authorizes a pump.
 - `commit_activation`: main-owner only in the exact registered owner session,
   including a fresh authenticated run. It takes only `action` and `leaseToken`.
   The controller calls the content-attested host transport's
@@ -100,10 +105,12 @@ are exactly `{ "status":"prepared" }`, `{ "status":"active" }`, and
 existing terminal cleanup shape.
 
 If a successful `register` response is lost, replaying the exact same prepared
-registration returns the same bounded result without creating another lease or
-using more capacity. Recovery compares the token, owner session and run, job,
-transport, destination, process, attested entries, and optional snapshot; any
-mismatch or replay after the lease changes phase fails closed.
+registration from a fresh authenticated run in the same owner session returns
+the same bounded result without creating another lease or using more capacity,
+and transfers the lifecycle completion fence to the recovery run. Recovery
+compares the token, owner session, job, transport, destination, process,
+attested entries, and optional snapshot; any other mismatch or replay after the
+lease changes phase fails closed.
 
 The lease token is hashed before persistence and is never logged or returned. The
 registry lives below OpenClaw's state directory, uses a `0700` directory and a
@@ -220,7 +227,9 @@ registered route before the real message tool executes.
 ## Automation payload
 
 [templates/report-controller-automation.json](templates/report-controller-automation.json)
-is the exact deterministic every-600000-ms isolated job template. Replace only
+is the exact deterministic every-60000-ms isolated polling job template. Report
+eligibility remains transport-owned at each 600000-ms cadence; polling does not
+make an intermediate report eligible early. Replace only
 `LEASE_TOKEN` and `JOB_ID` while preparing the private job. Its OpenClaw 2026.8.1 `script`
 payload runs in the headless code-mode executor with a 60-second timeout, a
 five-call budget, and an exact three-tool allowlist. It has no model fields,

@@ -86,12 +86,13 @@ export type PluginToolContext = {
 
 /**
  * Mirrors `PluginHookAgentContext`, narrowed to exactly the fields this
- * plugin reads. The host context carries more fields (`agentId`,
- * `sessionId`, `messageProvider`, `chatId`, `senderId`, ...), but none of
- * them participate in receipt eligibility or correlation, so they are
- * deliberately not mirrored here.
+ * plugin reads. `agentId`, `sessionKey`, and `runId` bind the controller's
+ * host-proven owner-run bridge. Other host fields (`sessionId`,
+ * `messageProvider`, `chatId`, `senderId`, ...) do not participate in receipt
+ * eligibility, correlation, or controller authority and are not mirrored.
  */
 export type AgentHookContext = {
+  agentId?: string;
   runId?: string;
   /**
    * Declared by the host type, but populated inconsistently at runtime on

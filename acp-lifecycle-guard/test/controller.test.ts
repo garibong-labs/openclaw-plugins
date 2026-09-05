@@ -15,7 +15,13 @@ import {
   discordSnowflakeInstant,
   type ActiveLease,
 } from "../src/controller/registry.ts";
-import type { GuardHostApi } from "../src/host-contract.ts";
+import type {
+  BeforeToolCallEvent,
+  BeforeToolCallResult,
+  GuardHostApi,
+  PluginToolContext,
+  ToolHookContext,
+} from "../src/host-contract.ts";
 import { ReasonCodes } from "../src/lifecycle/reason-codes.ts";
 import { CANONICAL_INTERMEDIATE, replaceLine } from "./fixtures.ts";
 
@@ -169,15 +175,27 @@ describe("owner-private persistent lease registry", () => {
     const recovered = register(recoveredRegistry, f);
     assert.deepEqual(recovered, first);
     assert.equal(fs.readFileSync(recoveredRegistry.file, "utf8"), persistedBeforeReplay);
-    const document = JSON.parse(persistedBeforeReplay) as { leases: unknown[] };
+
+    const recoveredFromFreshRun = register(recoveredRegistry, f, {
+      ownerRunId: "owner-run-example-recovery",
+    });
+    assert.equal(recoveredFromFreshRun.ownerRunId, "owner-run-example-recovery");
+    assert.equal(recoveredRegistry.leasesForOwner("agent:main:discord:example-owner",
+      "owner-run-example-1").length, 0);
+    assert.equal(recoveredRegistry.leasesForOwner("agent:main:discord:example-owner",
+      "owner-run-example-recovery").length, 1);
+    const persistedAfterRecovery = fs.readFileSync(recoveredRegistry.file, "utf8");
+    assert.notEqual(persistedAfterRecovery, persistedBeforeReplay);
+    const document = JSON.parse(persistedAfterRecovery) as {
+      leases: Array<{ ownerRunId: string }> };
     assert.equal(document.leases.length, 1);
+    assert.equal(document.leases[0]?.ownerRunId, "owner-run-example-recovery");
 
     const alternate = fixture();
     for (const overrides of [
       { leaseToken: "lease-token-example-00000002" },
       { processHandle: "process-example-mismatch" },
       { jobId: "job-example-mismatch" },
-      { ownerRunId: "owner-run-example-mismatch" },
       { ownerSessionKey: "agent:main:discord:example-owner-mismatch" },
       { transportFile: alternate.transport },
       { destination: { channel: "discord" as const, accountId: "account-mismatch", conversationId: "2" } },
@@ -919,5 +937,89 @@ describe("receipt time and lifecycle enforcement", () => {
     assert.deepEqual((globalThis as Record<string, unknown>).__acpControllerAbortInput,
       { transportFile: f.transport, processHandle: "process-example-1" });
     assert.equal(surfaces.registry.getByToken("lease-token-example-00000001"), undefined);
+  });
+});
+
+
+describe("host-proven controller owner-run admission", () => {
+  it("bridges the direct-owner run into tool hooks and recovers an exact registration from a fresh run", async () => {
+    const f = fixture();
+    let policy: { evaluate: (event: BeforeToolCallEvent, ctx: ToolHookContext) => BeforeToolCallResult | void } |
+      undefined;
+    let toolFactory: ((ctx: PluginToolContext) => {
+      execute: (id: string, params: unknown) => Promise<Record<string, unknown>> }) | undefined;
+    const api = {
+      id: "acp-lifecycle-guard",
+      logger: {},
+      runtime: { state: { resolveStateDir: () => f.state } },
+      on: () => {},
+      registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
+      registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
+    } as unknown as GuardHostApi;
+    const surfaces = createControllerSurfaces(api);
+    const sessionKey = "agent:main:discord:example-owner";
+    const registration = {
+      action: "register",
+      leaseToken: "lease-token-example-00000001",
+      transportFile: f.transport,
+      processHandle: "process-example-1",
+      jobId: "job-example-1",
+      destination: { channel: "discord", accountId: "account-example", conversationId: "1" },
+      reportPumpEntry: f.pump,
+      hostTransportEntry: f.host,
+    };
+    const invoke = async (id: string, runId: string, params: Record<string, unknown>,
+      senderIsOwner?: boolean) => {
+      const context: ToolHookContext = {
+        toolName: "acp_report_controller",
+        toolCallId: id,
+        agentId: "main",
+        sessionKey,
+        runId,
+        ...(senderIsOwner === undefined ? {} : { requester: { senderIsOwner } }),
+      };
+      policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id, params }, context);
+      return toolFactory!({ agentId: "main", sessionKey }).execute(id, params);
+    };
+
+    surfaces.beforeAgentRun(
+      { prompt: "owner request", messages: [], senderIsOwner: true },
+      { agentId: "main", sessionKey, runId: "owner-run-example-1" },
+    );
+    assert.deepEqual((await invoke("explicit-non-owner", "owner-run-example-1", registration, false)).details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    assert.deepEqual((await invoke("register-1", "owner-run-example-1", registration)).details,
+      { status: "prepared" });
+
+    assert.deepEqual((await invoke("unadmitted-run", "owner-run-example-untrusted", registration)).details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+
+    surfaces.beforeAgentRun(
+      { prompt: "fresh owner recovery", messages: [], senderIsOwner: true },
+      { agentId: "main", sessionKey, runId: "owner-run-example-2" },
+    );
+    assert.deepEqual((await invoke("register-fresh-run", "owner-run-example-2", registration)).details,
+      { status: "prepared" });
+    assert.equal(surfaces.registry.getByToken(registration.leaseToken)?.ownerRunId,
+      "owner-run-example-2", "recovery must transfer the lifecycle fence to the fresh owner run");
+    assert.equal(surfaces.beforeAgentFinalize({ sessionId: "example", stopHookActive: false }, {
+      agentId: "main", sessionKey, runId: "owner-run-example-2",
+    })?.action, "revise");
+    const yieldDecision = policy!.evaluate({
+      toolName: "sessions_yield", toolCallId: "fresh-owner-yield", params: {},
+    }, {
+      toolName: "sessions_yield", toolCallId: "fresh-owner-yield", agentId: "main",
+      sessionKey, runId: "owner-run-example-2",
+    });
+    assert.deepEqual(yieldDecision,
+      { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion });
+
+    surfaces.agentEnd(
+      { runId: "owner-run-example-2", messages: [], success: true },
+      { agentId: "main", sessionKey, runId: "owner-run-example-2" },
+    );
+    assert.deepEqual((await invoke("revoked-run", "owner-run-example-2", {
+      action: "status", leaseToken: registration.leaseToken,
+    })).details, { status: "error", code: ReasonCodes.ControllerCallerInvalid });
   });
 });
