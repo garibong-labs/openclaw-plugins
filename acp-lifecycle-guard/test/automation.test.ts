@@ -42,6 +42,14 @@ async function evaluate(
 }
 
 describe("shipped report controller automation", () => {
+  it("polls every minute without changing the ten-minute report cadence", () => {
+    const schedule = template.schedule as Record<string, unknown>;
+    assert.deepEqual(schedule, { kind: "every", everyMs: 60_000 });
+    const readme = fs.readFileSync(readmePath, "utf8");
+    assert.match(readme, /every-60000-ms isolated polling job/u);
+    assert.match(readme, /Report\s+eligibility remains transport-owned at each 600000-ms cadence/u);
+  });
+
   it("documents prepared scheduler ticks as inert and owner recovery as coordinator-owned", () => {
     const readme = fs.readFileSync(readmePath, "utf8");
     const persistedStart = readme.indexOf("**Persisted prepared lease");

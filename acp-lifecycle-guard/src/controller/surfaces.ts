@@ -3,6 +3,8 @@ import type {
   AgentHookContext,
   BeforeAgentFinalizeEvent,
   BeforeAgentFinalizeResult,
+  BeforeAgentRunEvent,
+  BeforeAgentRunPassDecision,
   BeforeToolCallEvent,
   BeforeToolCallResult,
   GuardHostApi,
@@ -32,6 +34,23 @@ type Admission = {
   runId?: string;
   owner: boolean;
 };
+
+type RunIdentity = {
+  agentId?: string;
+  sessionKey?: string;
+  runId?: string;
+};
+
+const MAX_OWNER_RUN_ADMISSIONS = 256;
+
+function ownerRunKey(identity: RunIdentity): string | undefined {
+  if (identity.agentId !== "main" || typeof identity.sessionKey !== "string" ||
+      identity.sessionKey.length === 0 || typeof identity.runId !== "string" ||
+      identity.runId.length === 0) {
+    return undefined;
+  }
+  return JSON.stringify([identity.agentId, identity.sessionKey, identity.runId]);
+}
 
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -116,6 +135,7 @@ const CONTROLLER_INPUT_SCHEMA = {
 export type ControllerSurfaces = {
   registry: LeaseRegistry;
   controller: ReportController;
+  beforeAgentRun: (event: BeforeAgentRunEvent, ctx: AgentHookContext) => BeforeAgentRunPassDecision;
   messageSending: (event: MessageSendingEvent, ctx: MessageHookContext) => MessageSendingResult | void;
   messageSent: (event: MessageSentEvent, ctx: MessageHookContext) => Promise<void>;
   beforeAgentFinalize: (event: BeforeAgentFinalizeEvent, ctx: AgentHookContext) => BeforeAgentFinalizeResult | void;
@@ -127,6 +147,7 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
   const registry = new LeaseRegistry(stateDir);
   const controller = new ReportController(registry);
   const admissions = new Map<string, Admission>();
+  const ownerRuns = new Set<string>();
 
   api.registerTrustedToolPolicy({
     id: POLICY_ID,
@@ -140,7 +161,9 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
           ...(ctx.sessionKey === undefined ? {} : { sessionKey: ctx.sessionKey }),
           ...(ctx.runId === undefined ? {} : { runId: ctx.runId }),
-          owner: ctx.requester?.senderIsOwner === true,
+          owner: ctx.requester?.senderIsOwner === true ||
+            (ctx.requester?.senderIsOwner === undefined &&
+              ownerRuns.has(ownerRunKey(ctx) ?? "")),
         });
         return;
       }
@@ -259,6 +282,21 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
   return {
     registry,
     controller,
+    beforeAgentRun(event, ctx) {
+      const key = ownerRunKey(ctx);
+      if (key !== undefined) {
+        if (event.senderIsOwner === true) {
+          if (!ownerRuns.has(key) && ownerRuns.size >= MAX_OWNER_RUN_ADMISSIONS) {
+            const oldest = ownerRuns.values().next().value;
+            if (oldest !== undefined) ownerRuns.delete(oldest);
+          }
+          ownerRuns.add(key);
+        } else {
+          ownerRuns.delete(key);
+        }
+      }
+      return { outcome: "pass" };
+    },
     messageSending(event, ctx) {
       let outcome: ReturnType<ReportController["authorizeSending"]>;
       try {
@@ -291,6 +329,13 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
       if (registry.leasesForOwner(ctx.sessionKey, ctx.runId ?? event.runId).length > 0) {
         log(api, "agent_end", "violation", ReasonCodes.LeaseAgentEndViolation);
       }
+      const runId = ctx.runId ?? event.runId;
+      const key = ownerRunKey({
+        ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
+        ...(ctx.sessionKey === undefined ? {} : { sessionKey: ctx.sessionKey }),
+        ...(runId === undefined ? {} : { runId }),
+      });
+      if (key !== undefined) ownerRuns.delete(key);
     },
   };
 }

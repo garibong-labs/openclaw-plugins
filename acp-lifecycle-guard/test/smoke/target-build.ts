@@ -12,9 +12,13 @@
  * Phase A - shipped default configuration (`pluginConfig` absent):
  *  1. `dist/index.js` loads against the real `openclaw/plugin-sdk/plugin-entry`,
  *     registers all controller and migration handlers, and exposes exactly one
- *     controller tool plus one scoped trusted-tool policy. The shipped report
- *     automation's executable result is accepted by the installed scheduler
- *     parser, while the formerly emitted null result is rejected.
+ *     controller tool plus one scoped trusted-tool policy. The installed hook
+ *     runtime plus the installed harness tool wrapper bridge one host-proven
+ *     direct Discord owner event into a requester-less controller registration,
+ *     preserve an explicit non-owner denial, and revoke the bridge at
+ *     `agent_end`. The shipped report automation's executable result is
+ *     accepted by the installed scheduler parser, while the formerly emitted
+ *     null result is rejected.
  *  2. A canonical completion report carrying seconds (`17분 31초`) survives the
  *     authoritative guard - the regression this smoke exists for.
  *  3. A malformed lifecycle report is cancelled with the expected reason code.
@@ -97,6 +101,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -461,7 +466,8 @@ async function main(): Promise<void> {
     assert.deepEqual((grantedInspect.typedHooks as Array<Record<string, unknown>>)
       .map((hook) => hook.name).sort(),
     ["agent_end", "agent_end", "before_agent_finalize", "before_agent_finalize",
-      "before_agent_run", "message_sending", "message_sending", "message_sent", "message_sent"].sort());
+      "before_agent_run", "before_agent_run", "message_sending", "message_sending", "message_sent",
+      "message_sent"].sort());
     const grantedDiagnostics = grantedInspect.diagnostics as Array<Record<string, unknown>>;
     assert.equal(grantedDiagnostics.some((diagnostic) =>
       String(diagnostic.message).includes("plugin must declare contracts.tools") ||
@@ -583,7 +589,7 @@ async function main(): Promise<void> {
       const matching = defaultRegistration.typedHooks.filter(
         (hook) => hook.hookName === hookName,
       );
-      const expected = hookName === "before_agent_run" ? 1 : 2;
+      const expected = 2;
       assert.equal(matching.length, expected, `expected ${expected} ${hookName} handler(s)`);
     }
     assert.equal(defaultRegistration.tools.length, 1, "controller tool registered");
@@ -601,8 +607,90 @@ async function main(): Promise<void> {
       ["register", "commit_activation", "abort_preactivation", "status", "tick", "release"],
       "the installed 2026.8.1 tool catalog exposes the closed prepared-to-active action inventory");
 
+    const ownerCodeDir = path.join(workspace, "owner-code");
+    mkdirSync(ownerCodeDir, { mode: 0o700 });
+    const ownerTransport = path.join(workspace, "owner-transport.json");
+    const ownerPump = path.join(ownerCodeDir, "acp-report-pump.mjs");
+    const ownerHost = path.join(ownerCodeDir, "acp-host-transport.mjs");
+    writeFileSync(ownerTransport, "{}\n", { mode: 0o600 });
+    writeFileSync(ownerPump, "export {};\n", { mode: 0o600 });
+    writeFileSync(ownerHost, "export {};\n", { mode: 0o600 });
+    chmodSync(ownerCodeDir, 0o700);
+    const controllerRunner = initRunner(defaultRegistration.typedHooks, [PLUGIN_ID], [{
+      pluginId: PLUGIN_ID,
+      pluginName: "ACP Lifecycle Guard",
+      origin: "config",
+      source: "smoke:target-build",
+      rootDir: PLUGIN_ROOT,
+      policy: defaultRegistration.policies[0],
+    }]);
+    const ownerRunContext = {
+      agentId: "main",
+      sessionKey: "agent:main:discord:smoke-owner",
+      runId: "smoke-owner-run-1",
+      trigger: "user",
+      channel: "discord",
+      channelId: "123456789",
+    };
+    assert.deepEqual(await controllerRunner.runBeforeAgentRun({
+      prompt: "owner controller bridge smoke",
+      messages: [],
+      channelId: "123456789",
+      senderId: "987654321",
+      senderIsOwner: true,
+    }, ownerRunContext), { decision: { outcome: "pass" }, pluginId: PLUGIN_ID });
+    const ownerRegistration = {
+      action: "register",
+      leaseToken: "smoke-owner-lease-token-0001",
+      transportFile: ownerTransport,
+      processHandle: "smoke-owner-process-1",
+      jobId: "smoke-owner-job-1",
+      destination: { channel: "discord", accountId: "default", conversationId: "123456789" },
+      reportPumpEntry: ownerPump,
+      hostTransportEntry: ownerHost,
+    };
+    const controllerAgentTool = controllerTool as
+      Parameters<typeof agentHarness.wrapToolWithBeforeToolCallHook>[0];
+    const explicitNonOwnerTool = agentHarness.wrapToolWithBeforeToolCallHook(
+      controllerAgentTool,
+      { ...ownerRunContext, requester: { senderIsOwner: false } },
+    );
+    const explicitNonOwnerResult = await explicitNonOwnerTool.execute(
+      "smoke-explicit-non-owner-call", ownerRegistration);
+    assert.deepEqual(explicitNonOwnerResult.details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid },
+      "an explicit non-owner tool context must not inherit the outer owner admission");
+
+    const bridgedTool = agentHarness.wrapToolWithBeforeToolCallHook(
+      controllerAgentTool,
+      ownerRunContext,
+    );
+    const ownerRegistrationResult = await bridgedTool.execute(
+      "smoke-owner-register-call", ownerRegistration);
+    assert.deepEqual(ownerRegistrationResult.details, { status: "prepared" });
+    await controllerRunner.runAgentEnd({
+      runId: ownerRunContext.runId,
+      messages: [],
+      success: true,
+    }, ownerRunContext);
+    const revokedTool = agentHarness.wrapToolWithBeforeToolCallHook(
+      controllerAgentTool,
+      ownerRunContext,
+    );
+    const revokedResult = await revokedTool.execute("smoke-owner-revoked-call", {
+      action: "status",
+      leaseToken: ownerRegistration.leaseToken,
+    });
+    assert.deepEqual(revokedResult.details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid },
+      "the installed agent_end path must revoke bridged owner authority");
+    hookRuntime.resetGlobalHookRunner();
+    record("installed hook and harness tool runtimes bridge and revoke direct-owner controller authority");
+
     const automationTemplate = JSON.parse(readFileSync(path.join(PLUGIN_ROOT,
       "templates", "report-controller-automation.json"), "utf8")) as Record<string, unknown>;
+    assert.deepEqual(automationTemplate.schedule, { kind: "every", everyMs: 60_000 },
+      "controller polling must stay independent from the ten-minute report eligibility cadence");
     const automationPayload = automationTemplate.payload as Record<string, unknown>;
     assert.equal(automationPayload.kind, "script");
     assert.equal(automationPayload.toolBudget, 5);

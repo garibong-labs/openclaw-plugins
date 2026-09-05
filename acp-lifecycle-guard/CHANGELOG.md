@@ -4,6 +4,22 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-09-05
+
+- Preserve a host-proven direct-owner admission across requester-less bridged
+  tool hooks by binding it to the exact `main` agent, session, and run and
+  revoking it at `agent_end`; an explicit non-owner tool context still fails
+  closed.
+- Recover byte-identical prepared registrations from a fresh authenticated run
+  in the same owner session and transfer the lifecycle completion fence to that
+  recovery run.
+- Exercise controller registration and revocation through the installed
+  OpenClaw hook, harness tool-dispatch wrapper, and trusted-tool-policy runtime
+  so requester-bridge drift cannot hide behind direct executor calls.
+- Poll the controller every 60 seconds while retaining the transport-owned
+  600-second report cadence, preventing phase offset from delaying a due or
+  terminal report for nearly another full cadence.
+
 ## [0.6.1] - 2026-09-04
 
 - Keep scheduler ticks inert for prepared controller leases so unresolved,

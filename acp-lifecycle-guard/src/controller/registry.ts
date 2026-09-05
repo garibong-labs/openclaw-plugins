@@ -360,8 +360,12 @@ export class LeaseRegistry {
       const sameSnapshot = existing.snapshotFile === undefined
         ? snapshotFile === undefined
         : snapshotFile !== undefined && sameAttestation(existing.snapshotFile, snapshotFile);
+      // The trusted surface proves the current caller is an authenticated owner
+      // run in this exact session. A fresh recovery run necessarily has a new
+      // run id, so only a byte-identical prepared registration may transfer the
+      // lifecycle fence to that run.
       const exactReplay = existing.phase === "prepared" && existing.cleanupState === null &&
-        existing.ownerSessionKey === input.ownerSessionKey && existing.ownerRunId === input.ownerRunId &&
+        existing.ownerSessionKey === input.ownerSessionKey &&
         existing.processHandle === input.processHandle && existing.jobId === input.jobId &&
         existing.destination.channel === destination.channel &&
         existing.destination.accountId === destination.accountId &&
@@ -369,7 +373,18 @@ export class LeaseRegistry {
         sameAttestation(existing.transportFile, transportFile) &&
         sameAttestation(existing.reportPumpEntry, reportPumpEntry) &&
         sameAttestation(existing.hostTransportEntry, hostTransportEntry) && sameSnapshot;
-      if (exactReplay) return existing;
+      if (exactReplay) {
+        if (existing.ownerRunId === input.ownerRunId) return existing;
+        const previousOwnerRunId = existing.ownerRunId;
+        existing.ownerRunId = input.ownerRunId;
+        try {
+          this.persist();
+        } catch (error) {
+          existing.ownerRunId = previousOwnerRunId;
+          throw error;
+        }
+        return existing;
+      }
       fail("acp_lifecycle_guard.controller.duplicate");
     }
     const preparedForOwner = [...this.entries.values()]
