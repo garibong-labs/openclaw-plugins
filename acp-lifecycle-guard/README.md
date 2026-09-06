@@ -41,10 +41,16 @@ this package never edits live configuration or restarts services.
 
 The controller exposes six closed actions through one plugin tool:
 
-- `register`: main-owner only. Binds an opaque lease token to the exact owner
-  session/run, ACP transport file and process handle, report-pump job,
-  Discord conversation/account, and attested skills pump/transport entries.
-  It persists the lease in `prepared`; registration never authorizes a pump.
+- `register`: main-owner only. The trusted tool requester may prove ownership
+  directly. When a bridged tool call omits that optional requester bit, the
+  controller accepts only a host-proven `before_agent_run` owner admission
+  bound to the exact `main` agent, session, and run; an explicit non-owner bit
+  is never overridden, and the bridge is revoked at `agent_end` together with
+  any tool admission that run computed but never executed. Registration
+  binds an opaque lease token to the exact owner session/run, ACP transport file
+  and process handle, report-pump job, Discord conversation/account, and
+  attested skills pump/transport entries. It persists the lease in `prepared`;
+  registration never authorizes a pump.
 - `commit_activation`: main-owner only in the exact registered owner session,
   including a fresh authenticated run. It takes only `action` and `leaseToken`.
   The controller calls the content-attested host transport's
@@ -100,10 +106,15 @@ are exactly `{ "status":"prepared" }`, `{ "status":"active" }`, and
 existing terminal cleanup shape.
 
 If a successful `register` response is lost, replaying the exact same prepared
-registration returns the same bounded result without creating another lease or
-using more capacity. Recovery compares the token, owner session and run, job,
-transport, destination, process, attested entries, and optional snapshot; any
-mismatch or replay after the lease changes phase fails closed.
+registration from another authenticated `main` run in the same owner session
+returns the same bounded result without creating another lease or using more
+capacity, and transfers the lifecycle completion fence to the recovery run. The
+host runs one turn per session at a time, so the original run has already ended;
+the controller does not verify that itself. Recovery compares the token, owner
+session, job, transport, destination, process, attested entries, and optional
+snapshot; any other mismatch, a replay after the lease changes phase, or a
+recovering run that already holds a lease fails closed. A transfer is logged as
+one content-free `fence_transferred` line.
 
 The lease token is hashed before persistence and is never logged or returned. The
 registry lives below OpenClaw's state directory, uses a `0700` directory and a
@@ -220,7 +231,14 @@ registered route before the real message tool executes.
 ## Automation payload
 
 [templates/report-controller-automation.json](templates/report-controller-automation.json)
-is the exact deterministic every-600000-ms isolated job template. Replace only
+is the exact deterministic every-60000-ms isolated polling job template. Report
+eligibility remains transport-owned at each 600000-ms cadence; polling does not
+make an intermediate report eligible early. Because polling is now shorter than
+the cadence, an expired `delivery_missing` or `delivery_uncertain` attempt is
+reclaimed on the next poll rather than the next cadence, so a transport attempt
+TTL below 600000 ms allows more than one reclaim of the same report per
+cadence. A retained prepared lease costs one inert isolated run and one
+content-free `lease_prepared` line per poll until the owner resolves it. Replace only
 `LEASE_TOKEN` and `JOB_ID` while preparing the private job. Its OpenClaw 2026.8.1 `script`
 payload runs in the headless code-mode executor with a 60-second timeout, a
 five-call budget, and an exact three-tool allowlist. It has no model fields,
@@ -256,7 +274,18 @@ The manifest declares the scoped trusted policy
 - `before_agent_finalize` requests a bounded fail-closed revision while the
   exact owner lease is prepared or active.
 - `agent_end` emits one bounded, content-free violation and does not release the
-  lease.
+  lease. It also revokes the run's host-proven owner admission and discards tool
+  admissions that run computed but never executed.
+
+`before_agent_run` records a host-proven direct-owner admission for the exact
+`main` agent, session, and run; requester-less bridged `acp_report_controller`
+calls in that run use it. The handler fails open and always returns the explicit
+pass decision, and bounded-cap eviction of an admission is logged as one
+content-free `owner_run_evicted` line. The admission is per host run. OpenClaw
+2026.8.1 fingerprints `senderIsOwner` when steering an active run and queues an
+authority-mismatched follow-up into a separate run, so another sender cannot
+inherit the admitted owner's controller authority. The plugin still requires
+the exact host-proven owner admission on every run that drives the controller.
 
 OpenClaw's ordinary `agent_end` hook is observational and has no cancellation
 result. The plugin therefore cannot cancel an end after the host's bounded

@@ -100,6 +100,10 @@ export const ReasonCodes = {
   LeaseEarlyCompletion: `${REASON_CODE_PREFIX}.controller.early_completion_blocked`,
   LeaseFinalizeBlocked: `${REASON_CODE_PREFIX}.controller.finalize_blocked`,
   LeaseAgentEndViolation: `${REASON_CODE_PREFIX}.controller.agent_end_violation`,
+  /** The bounded owner-run admission cap displaced its oldest entry. */
+  ControllerOwnerRunEvicted: `${REASON_CODE_PREFIX}.controller.owner_run_evicted`,
+  /** An exact prepared replay re-bound the lifecycle fence to the replaying run. */
+  ControllerFenceTransferred: `${REASON_CODE_PREFIX}.controller.fence_transferred`,
 } as const;
 
 export type ReasonCode = (typeof ReasonCodes)[keyof typeof ReasonCodes];

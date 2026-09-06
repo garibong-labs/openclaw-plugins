@@ -308,7 +308,7 @@ export class LeaseRegistry {
     }
   }
 
-  private persist(): void {
+  private persist(markCommitted: () => void): void {
     this.ensureDirectory();
     const temporary = path.join(this.directory, `.active-leases.${process.pid}.${crypto.randomUUID()}.tmp`);
     const document: RegistryDocument = {
@@ -327,12 +327,30 @@ export class LeaseRegistry {
       fs.closeSync(fd);
       fd = undefined;
       fs.renameSync(temporary, this.file);
+      // renameSync is the atomic commit point. Failures in the post-commit
+      // chmod/directory-fsync durability steps must not roll memory back to a
+      // state older than the registry document now visible on disk.
+      markCommitted();
       fs.chmodSync(this.file, 0o600);
       const dirFd = fs.openSync(this.directory, "r");
       try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
     } finally {
       if (fd !== undefined) fs.closeSync(fd);
       try { fs.unlinkSync(temporary); } catch { /* rename already consumed it */ }
+    }
+  }
+
+  // Roll memory back only when persistence fails before the atomic rename.
+  // Once rename commits the document, memory already matches the visible file
+  // and must retain the mutation even if a later durability step reports an
+  // error to the caller.
+  private persistOrRollback(rollback: () => void): void {
+    let committed = false;
+    try {
+      this.persist(() => { committed = true; });
+    } catch (error) {
+      if (!committed) rollback();
+      throw error;
     }
   }
 
@@ -360,8 +378,14 @@ export class LeaseRegistry {
       const sameSnapshot = existing.snapshotFile === undefined
         ? snapshotFile === undefined
         : snapshotFile !== undefined && sameAttestation(existing.snapshotFile, snapshotFile);
+      // The trusted surface proves the current caller is an authenticated owner
+      // run in this exact session, and the host runs one turn per session at a
+      // time, so a replay from another run id is a lost-response recovery. Only
+      // a byte-identical prepared registration may transfer the lifecycle fence
+      // to that run, and only while the recovering run holds no other lease:
+      // the one-lease-per-owner-run rule below applies to transfers too.
       const exactReplay = existing.phase === "prepared" && existing.cleanupState === null &&
-        existing.ownerSessionKey === input.ownerSessionKey && existing.ownerRunId === input.ownerRunId &&
+        existing.ownerSessionKey === input.ownerSessionKey &&
         existing.processHandle === input.processHandle && existing.jobId === input.jobId &&
         existing.destination.channel === destination.channel &&
         existing.destination.accountId === destination.accountId &&
@@ -369,7 +393,17 @@ export class LeaseRegistry {
         sameAttestation(existing.transportFile, transportFile) &&
         sameAttestation(existing.reportPumpEntry, reportPumpEntry) &&
         sameAttestation(existing.hostTransportEntry, hostTransportEntry) && sameSnapshot;
-      if (exactReplay) return existing;
+      if (exactReplay) {
+        if (existing.ownerRunId === input.ownerRunId) return existing;
+        if ([...this.entries.values()].some((entry) => entry !== existing &&
+          entry.ownerSessionKey === input.ownerSessionKey && entry.ownerRunId === input.ownerRunId)) {
+          fail("acp_lifecycle_guard.controller.duplicate");
+        }
+        const previousOwnerRunId = existing.ownerRunId;
+        existing.ownerRunId = input.ownerRunId;
+        this.persistOrRollback(() => { existing.ownerRunId = previousOwnerRunId; });
+        return existing;
+      }
       fail("acp_lifecycle_guard.controller.duplicate");
     }
     const preparedForOwner = [...this.entries.values()]
@@ -405,7 +439,7 @@ export class LeaseRegistry {
       cleanupState: null,
     };
     this.entries.set(hash, entry);
-    try { this.persist(); } catch (error) { this.entries.delete(hash); throw error; }
+    this.persistOrRollback(() => { this.entries.delete(hash); });
     return entry;
   }
 
@@ -434,9 +468,7 @@ export class LeaseRegistry {
     this.revalidate(entry);
     const previous = entry.cleanupState;
     entry.cleanupState = state;
-    // Every mutating path rolls the in-memory entry back on a failed write, so
-    // a durable read after a persistence failure never disagrees with memory.
-    try { this.persist(); } catch (error) { entry.cleanupState = previous; throw error; }
+    this.persistOrRollback(() => { entry.cleanupState = previous; });
   }
 
   async commitActivation(entry: ControllerLease): Promise<void> {
@@ -464,7 +496,7 @@ export class LeaseRegistry {
       fail("acp_lifecycle_guard.controller.activation_evidence_invalid");
     }
     entry.phase = "active";
-    try { this.persist(); } catch (error) { entry.phase = "prepared"; throw error; }
+    this.persistOrRollback(() => { entry.phase = "prepared"; });
   }
 
   async abortPreactivation(entry: ControllerLease): Promise<void> {
@@ -498,7 +530,7 @@ export class LeaseRegistry {
 
   release(entry: ControllerLease): void {
     this.entries.delete(entry.leaseHash);
-    try { this.persist(); } catch (error) { this.entries.set(entry.leaseHash, entry); throw error; }
+    this.persistOrRollback(() => { this.entries.set(entry.leaseHash, entry); });
   }
 
   revalidate(entry: ControllerLease): void {

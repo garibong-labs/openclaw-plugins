@@ -487,6 +487,9 @@ export function registerGuard(api: GuardHostApi): void {
   if (controller === undefined) {
     return;
   }
+  api.on("before_agent_run", controller.beforeAgentRun, {
+    priority: RECEIPT_HOOK_PRIORITY,
+  });
   api.on("message_sending", controller.messageSending, {
     priority: MESSAGE_SENDING_PRIORITY - 1,
   });

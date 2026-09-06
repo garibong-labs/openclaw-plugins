@@ -110,6 +110,7 @@ describe("registerGuard", () => {
       "before_agent_finalize",
       "before_agent_finalize",
       "before_agent_run",
+      "before_agent_run",
       "message_sending",
       "message_sending",
       "message_sent",

@@ -3,6 +3,8 @@ import type {
   AgentHookContext,
   BeforeAgentFinalizeEvent,
   BeforeAgentFinalizeResult,
+  BeforeAgentRunEvent,
+  BeforeAgentRunPassDecision,
   BeforeToolCallEvent,
   BeforeToolCallResult,
   GuardHostApi,
@@ -21,6 +23,7 @@ import {
   type ActiveLease,
   type LeaseDestination,
 } from "./registry.ts";
+import { OwnerRunAdmissions, ownerRunKey, resolveOwnerAuthority } from "./owner-runs.ts";
 
 const POLICY_ID = "acp-report-controller-lifecycle-v1";
 const FINALIZE_INSTRUCTION =
@@ -32,6 +35,11 @@ type Admission = {
   runId?: string;
   owner: boolean;
 };
+
+type MainOwnerAdmission = Admission & { sessionKey: string; runId: string };
+
+/** Tool-call admissions are keyed by host tool-call id and consumed by `execute`. */
+const MAX_TOOL_CALL_ADMISSIONS = 256;
 
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -56,9 +64,14 @@ function log(api: Pick<GuardHostApi, "logger">, hook: string, outcome: string, r
   api.logger.warn?.(`[acp-lifecycle-guard] hook=${hook} outcome=${outcome} kind=controller reason=${reason}`);
 }
 
+/** The one main-owner-run predicate every owner-only controller action shares. */
+function isMainOwnerRun(admission: Admission): admission is MainOwnerAdmission {
+  return admission.owner && admission.agentId === "main" &&
+    ownerRunKey(admission.sessionKey, admission.runId) !== undefined;
+}
+
 function isOwnerSession(entry: ActiveLease, admission: Admission): boolean {
-  return admission.agentId === "main" && admission.owner &&
-    admission.sessionKey === entry.ownerSessionKey && typeof admission.runId === "string" && admission.runId.length > 0;
+  return isMainOwnerRun(admission) && admission.sessionKey === entry.ownerSessionKey;
 }
 
 const CONTROLLER_OUTPUT_SCHEMA = {
@@ -116,6 +129,7 @@ const CONTROLLER_INPUT_SCHEMA = {
 export type ControllerSurfaces = {
   registry: LeaseRegistry;
   controller: ReportController;
+  beforeAgentRun: (event: BeforeAgentRunEvent, ctx: AgentHookContext) => BeforeAgentRunPassDecision;
   messageSending: (event: MessageSendingEvent, ctx: MessageHookContext) => MessageSendingResult | void;
   messageSent: (event: MessageSentEvent, ctx: MessageHookContext) => Promise<void>;
   beforeAgentFinalize: (event: BeforeAgentFinalizeEvent, ctx: AgentHookContext) => BeforeAgentFinalizeResult | void;
@@ -127,6 +141,7 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
   const registry = new LeaseRegistry(stateDir);
   const controller = new ReportController(registry);
   const admissions = new Map<string, Admission>();
+  const ownerRuns = new OwnerRunAdmissions();
 
   api.registerTrustedToolPolicy({
     id: POLICY_ID,
@@ -135,12 +150,15 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
     evaluate(event: BeforeToolCallEvent, ctx): BeforeToolCallResult | void {
       if (event.toolName === CONTROLLER_TOOL_NAME) {
         if (!event.toolCallId) return { block: true, blockReason: ReasonCodes.ControllerCallerInvalid };
-        if (admissions.size >= 256) admissions.delete(admissions.keys().next().value as string);
+        if (admissions.size >= MAX_TOOL_CALL_ADMISSIONS) {
+          admissions.delete(admissions.keys().next().value as string);
+        }
         admissions.set(event.toolCallId, {
           ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
           ...(ctx.sessionKey === undefined ? {} : { sessionKey: ctx.sessionKey }),
           ...(ctx.runId === undefined ? {} : { runId: ctx.runId }),
-          owner: ctx.requester?.senderIsOwner === true,
+          owner: resolveOwnerAuthority(ctx.requester?.senderIsOwner,
+            ctx.agentId === "main" && ownerRuns.has(ctx.sessionKey, ctx.runId)),
         });
         return;
       }
@@ -205,16 +223,19 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
         }
         const entry = action === "register" ? undefined : registry.getByToken(params.leaseToken);
         if (action === "register") {
-          if (admission.agentId !== "main" || !admission.owner || !admission.sessionKey || !admission.runId ||
-              ctx.agentId !== admission.agentId || ctx.sessionKey !== admission.sessionKey) {
-            throw new Error(ReasonCodes.ControllerCallerInvalid);
-          }
+          if (!isMainOwnerRun(admission)) throw new Error(ReasonCodes.ControllerCallerInvalid);
           const destination = object(params.destination) as LeaseDestination;
-          registry.register({ leaseToken: string(params.leaseToken), ownerSessionKey: admission.sessionKey,
+          const previousOwnerRunId = registry.getByToken(params.leaseToken)?.ownerRunId;
+          const lease = registry.register({ leaseToken: string(params.leaseToken), ownerSessionKey: admission.sessionKey,
             ownerRunId: admission.runId, transportFile: string(params.transportFile),
             processHandle: string(params.processHandle), jobId: string(params.jobId), destination,
             reportPumpEntry: string(params.reportPumpEntry), hostTransportEntry: string(params.hostTransportEntry),
             ...(params.snapshotFile === undefined ? {} : { snapshotFile: string(params.snapshotFile) }) });
+          if (previousOwnerRunId !== undefined && previousOwnerRunId !== lease.ownerRunId) {
+            // A durable authority change for a run other than the caller's is
+            // never silent; the line carries only the stable reason code.
+            log(api, CONTROLLER_TOOL_NAME, "transferred", ReasonCodes.ControllerFenceTransferred);
+          }
           return toolResult({ status: "prepared" });
         }
         if (!entry) throw new Error(ReasonCodes.ControllerLeaseNotFound);
@@ -259,6 +280,27 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
   return {
     registry,
     controller,
+    beforeAgentRun(event, ctx) {
+      // The host runs this gate fail-closed: a throwing handler blocks the run.
+      // Owner admission is optional authority and must never cost a turn, so
+      // both inputs are read defensively and every path returns the explicit
+      // pass decision (see the receipt handler in register.ts).
+      try {
+        const run = object(ctx);
+        if (run.agentId === "main") {
+          if (object(event).senderIsOwner === true) {
+            if (ownerRuns.admit(run.sessionKey, run.runId)) {
+              log(api, "before_agent_run", "evicted", ReasonCodes.ControllerOwnerRunEvicted);
+            }
+          } else {
+            ownerRuns.revoke(run.sessionKey, run.runId);
+          }
+        }
+      } catch {
+        // Fail open on admission bookkeeping only; the run proceeds.
+      }
+      return { outcome: "pass" };
+    },
     messageSending(event, ctx) {
       let outcome: ReturnType<ReportController["authorizeSending"]>;
       try {
@@ -288,7 +330,19 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           idempotencyKey: "acp_lifecycle_guard.active_lease_v1", maxAttempts: 2 } };
     },
     agentEnd(event, ctx) {
-      if (registry.leasesForOwner(ctx.sessionKey, ctx.runId ?? event.runId).length > 0) {
+      const runId = ctx.runId ?? event.runId;
+      // Authority must not outlive its run: revoke the owner admission first,
+      // then drop tool admissions the run computed but never executed, so a
+      // controller call still in flight at agent_end fails closed.
+      ownerRuns.revoke(ctx.sessionKey, runId);
+      if (ctx.sessionKey !== undefined && runId !== undefined) {
+        for (const [toolCallId, admission] of admissions) {
+          if (admission.sessionKey === ctx.sessionKey && admission.runId === runId) {
+            admissions.delete(toolCallId);
+          }
+        }
+      }
+      if (registry.leasesForOwner(ctx.sessionKey, runId).length > 0) {
         log(api, "agent_end", "violation", ReasonCodes.LeaseAgentEndViolation);
       }
     },
