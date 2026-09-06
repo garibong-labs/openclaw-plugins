@@ -44,10 +44,13 @@ The controller exposes six closed actions through one plugin tool:
 - `register`: main-owner only. The trusted tool requester may prove ownership
   directly. When a bridged tool call omits that optional requester bit, the
   controller accepts only a host-proven `before_agent_run` owner admission
-  bound to the exact `main` agent, session, and run; an explicit non-owner bit
-  is never overridden, and the bridge is revoked at `agent_end` together with
-  any tool admission that run computed but never executed. Registration
-  binds an opaque lease token to the exact owner session/run, ACP transport file
+  bound to the exact `main` agent, ephemeral session, and run. OpenClaw's
+  canonical run session key and projected sandbox/runtime tool session key are
+  treated as aliases only when that exact ephemeral session id and run id
+  match. An explicit non-owner bit is never overridden, and the bridge is
+  revoked at `agent_end` together with any tool admission that run computed but
+  never executed. Registration binds an opaque lease token to the exact owner
+  session/run, ACP transport file
   and process handle, report-pump job, Discord conversation/account, and
   attested skills pump/transport entries. It persists the lease in `prepared`;
   registration never authorizes a pump.
@@ -278,11 +281,15 @@ The manifest declares the scoped trusted policy
   admissions that run computed but never executed.
 
 `before_agent_run` records a host-proven direct-owner admission for the exact
-`main` agent, session, and run; requester-less bridged `acp_report_controller`
-calls in that run use it. The handler fails open and always returns the explicit
-pass decision, and bounded-cap eviction of an admission is logged as one
-content-free `owner_run_evicted` line. The admission is per host run. OpenClaw
-2026.8.1 fingerprints `senderIsOwner` when steering an active run and queues an
+`main` agent, canonical session, ephemeral session, and run; requester-less
+bridged `acp_report_controller` calls in that run use it. OpenClaw 2026.8.1 may
+project a different sandbox/runtime session key into the tool surface, so the
+bridge resolves that key only through the same non-empty ephemeral session id
+and exact run id, while the canonical owner session remains on the lease. The
+handler fails open and always returns the explicit pass decision, and
+bounded-cap eviction of an admission is logged as one content-free
+`owner_run_evicted` line. The admission is per host run. OpenClaw 2026.8.1
+fingerprints `senderIsOwner` when steering an active run and queues an
 authority-mismatched follow-up into a separate run, so another sender cannot
 inherit the admitted owner's controller authority. The plugin still requires
 the exact host-proven owner admission on every run that drives the controller.

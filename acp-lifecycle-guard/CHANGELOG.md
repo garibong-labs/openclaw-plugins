@@ -4,6 +4,14 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-09-06
+
+- Reconcile OpenClaw 2026.8.1's canonical run session key with its projected
+  sandbox/runtime tool session key only through the exact shared ephemeral
+  session id and run id, preserving the canonical owner session on the lease.
+- Keep explicit non-owner verdicts authoritative, reject cross-session and
+  cross-run transfers, and revoke projected-key admissions at `agent_end`.
+
 ## [0.6.3] - 2026-09-06
 
 - Make host-proven owner-run admission initialization and revocation atomic

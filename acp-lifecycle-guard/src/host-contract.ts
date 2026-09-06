@@ -74,7 +74,13 @@ export type ToolHookContext = {
   toolName: string;
   toolCallId?: string;
   channelId?: string;
-  requester?: { senderIsOwner?: boolean };
+  requester?: {
+    channel?: string;
+    accountId?: string;
+    senderId?: string;
+    senderIsOwner?: boolean;
+    roleIds?: readonly string[];
+  };
 };
 
 export type PluginToolContext = {
@@ -86,9 +92,9 @@ export type PluginToolContext = {
 
 /**
  * Mirrors `PluginHookAgentContext`, narrowed to exactly the fields this
- * plugin reads. `agentId`, `sessionKey`, and `runId` bind the controller's
- * host-proven owner-run bridge. Other host fields (`sessionId`,
- * `messageProvider`, `chatId`, `senderId`, ...) do not participate in receipt
+ * plugin reads. `agentId`, `sessionKey`, `sessionId`, and `runId` bind the
+ * controller's host-proven owner-run bridge. Other host fields
+ * (`messageProvider`, `chatId`, `senderId`, ...) do not participate in receipt
  * eligibility, correlation, or controller authority and are not mirrored.
  */
 export type AgentHookContext = {
@@ -104,6 +110,8 @@ export type AgentHookContext = {
    */
   jobId?: string;
   sessionKey?: string;
+  /** Ephemeral session UUID regenerated on reset/new. */
+  sessionId?: string;
   trigger?: string;
   /** Channel/plugin id for channel-originated runs, e.g. a messenger name. */
   channel?: string;

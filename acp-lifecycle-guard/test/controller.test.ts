@@ -1047,6 +1047,7 @@ describe("receipt time and lifecycle enforcement", () => {
 
 describe("host-proven controller owner-run admission", () => {
   const sessionKey = "agent:main:discord:example-owner";
+  const sessionId = "example-owner-session-id";
   const leaseToken = "lease-token-example-00000001";
   const contentFree = (line: string): boolean =>
     !line.includes("example-owner") && !line.includes("owner-run") && !line.includes("lease-token") &&
@@ -1114,6 +1115,158 @@ describe("host-proven controller owner-run admission", () => {
     })).details, { status: "error", code: ReasonCodes.ControllerCallerInvalid });
     assert.ok(h.logs.length > 0);
     assert.ok(h.logs.every(contentFree));
+  });
+
+  it("bridges a direct Discord owner across the host run and runtime tool session keys", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const registration = registrationParams(f);
+    const runtimeSessionKey = "agent:main:sandbox:example-owner";
+    const runId = "owner-run-example-split-1";
+
+    assert.deepEqual(h.surfaces.beforeAgentRun({
+      prompt: "owner request",
+      messages: [],
+      channelId: "123456789",
+      senderId: "owner-sender-example",
+      senderIsOwner: true,
+    }, {
+      agentId: "main",
+      sessionKey,
+      sessionId,
+      runId,
+      trigger: "user",
+      channel: "discord",
+      channelId: "123456789",
+    }), { outcome: "pass" });
+
+    const toolContext = {
+      agentId: "main",
+      sessionKey: runtimeSessionKey,
+      sessionId,
+      requesterSenderId: "owner-sender-example",
+      senderIsOwner: true,
+    };
+    const policyContext: ToolHookContext = {
+      toolName: "acp_report_controller",
+      toolCallId: "split-session-register",
+      agentId: "main",
+      sessionKey: runtimeSessionKey,
+      sessionId,
+      runId,
+    };
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "split-session-cross-run",
+      params: registration,
+    }, { ...policyContext, toolCallId: "split-session-cross-run", runId: `${runId}-other` });
+    assert.deepEqual((await h.toolFactory(toolContext).execute(
+      "split-session-cross-run", registration)).details,
+    { status: "error", code: ReasonCodes.ControllerCallerInvalid },
+    "the shared ephemeral session does not transfer admission to another run");
+
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "split-session-register",
+      params: registration,
+    }, policyContext);
+    assert.deepEqual((await h.toolFactory(toolContext).execute(
+      "split-session-register", registration)).details, { status: "prepared" });
+    assert.equal(h.surfaces.registry.getByToken(leaseToken)?.ownerSessionKey, sessionKey,
+      "the canonical owner session, not the runtime sandbox key, owns the lease");
+    assert.equal(h.surfaces.registry.getByToken(leaseToken)?.ownerRunId, runId);
+
+    h.surfaces.agentEnd({ runId, messages: [], success: true }, {
+      agentId: "main", sessionKey, sessionId, runId,
+    });
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "split-session-revoked",
+      params: { action: "status", leaseToken },
+    }, { ...policyContext, toolCallId: "split-session-revoked" });
+    assert.deepEqual((await h.toolFactory(toolContext).execute("split-session-revoked", {
+      action: "status", leaseToken,
+    })).details, { status: "error", code: ReasonCodes.ControllerCallerInvalid },
+    "agent_end revokes the owner bridge across both session-key projections");
+  });
+
+  it("binds an explicit direct-owner policy call to the same ephemeral session across split keys", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const registration = registrationParams(f);
+    const runtimeSessionKey = "agent:main:sandbox:example-owner";
+    const runId = "owner-run-example-split-2";
+    const policyContext: ToolHookContext = {
+      toolName: "acp_report_controller",
+      toolCallId: "explicit-split-register",
+      agentId: "main",
+      sessionKey,
+      sessionId,
+      runId,
+      requester: {
+        channel: "discord",
+        senderId: "owner-sender-example",
+        senderIsOwner: true,
+      },
+    };
+    const runtimeToolContext = {
+      agentId: "main",
+      sessionKey: runtimeSessionKey,
+      sessionId,
+      requesterSenderId: "owner-sender-example",
+      senderIsOwner: true,
+    };
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "explicit-split-non-owner",
+      params: registration,
+    }, {
+      ...policyContext,
+      toolCallId: "explicit-split-non-owner",
+      requester: {
+        channel: "discord",
+        senderId: "allowlisted-non-owner",
+        senderIsOwner: false,
+      },
+    });
+    assert.deepEqual((await h.toolFactory(runtimeToolContext).execute(
+      "explicit-split-non-owner", registration)).details,
+    { status: "error", code: ReasonCodes.ControllerCallerInvalid },
+    "an allowlisted but non-owner sender remains denied");
+
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "explicit-split-owner-mismatch",
+      params: registration,
+    }, { ...policyContext, toolCallId: "explicit-split-owner-mismatch" });
+    assert.deepEqual((await h.toolFactory({
+      ...runtimeToolContext,
+      senderIsOwner: false,
+    }).execute("explicit-split-owner-mismatch", registration)).details,
+    { status: "error", code: ReasonCodes.ControllerCallerInvalid },
+    "a non-owner tool runtime cannot inherit an owner policy admission");
+
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "explicit-split-cross-session",
+      params: registration,
+    }, { ...policyContext, toolCallId: "explicit-split-cross-session" });
+    assert.deepEqual((await h.toolFactory({
+      ...runtimeToolContext,
+      sessionId: "other-ephemeral-session-id",
+    }).execute("explicit-split-cross-session", registration)).details,
+    { status: "error", code: ReasonCodes.ControllerCallerInvalid },
+    "an explicit owner admission cannot transfer across ephemeral sessions");
+
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "explicit-split-register",
+      params: registration,
+    }, policyContext);
+    assert.deepEqual((await h.toolFactory(runtimeToolContext).execute(
+      "explicit-split-register", registration)).details, { status: "prepared" });
+    assert.equal(h.surfaces.registry.getByToken(leaseToken)?.ownerSessionKey, sessionKey);
+    assert.equal(h.surfaces.registry.getByToken(leaseToken)?.ownerRunId, runId);
   });
 
   it("never admits non-main or identity-less runs, revokes on a later non-owner gate, and never throws on the fail-closed gate", async () => {
@@ -1206,6 +1359,24 @@ describe("owner-run admissions", () => {
     assert.equal(admissions.size, 1);
     admissions.revoke(sessionKey, "owner-run-example-1");
     assert.equal(admissions.has(sessionKey, "owner-run-example-1"), false);
+    assert.equal(admissions.size, 0);
+  });
+
+  it("aliases projected keys only through the same ephemeral session and exact run", () => {
+    const admissions = new OwnerRunAdmissions();
+    const canonicalKey = "agent:main:discord:example-owner";
+    const runtimeKey = "agent:main:sandbox:example-owner";
+    const runId = "owner-run-example-projected";
+    const sessionId = "owner-session-example-projected";
+    assert.equal(admissions.admit(canonicalKey, runId, sessionId), false);
+    assert.equal(admissions.resolve(runtimeKey, runId, sessionId)?.sessionKey, canonicalKey);
+    assert.equal(admissions.has(runtimeKey, `${runId}-other`, sessionId), false);
+    assert.equal(admissions.has(runtimeKey, runId, "other-session"), false);
+    assert.equal(admissions.has(runtimeKey, runId), false,
+      "a partial identity cannot fall back to a different projected key");
+    assert.equal(admissions.has(canonicalKey, runId), false,
+      "a partial identity cannot bypass the ephemeral session fence");
+    admissions.revoke(runtimeKey, runId, sessionId);
     assert.equal(admissions.size, 0);
   });
 

@@ -31,12 +31,16 @@ const FINALIZE_INSTRUCTION =
 
 type Admission = {
   agentId?: string;
-  sessionKey?: string;
+  /** Session key carried by the trusted tool-policy invocation. */
+  executionSessionKey?: string;
+  /** Canonical owner session key used by lifecycle and durable lease guards. */
+  ownerSessionKey?: string;
+  sessionId?: string;
   runId?: string;
   owner: boolean;
 };
 
-type MainOwnerAdmission = Admission & { sessionKey: string; runId: string };
+type MainOwnerAdmission = Admission & { ownerSessionKey: string; runId: string };
 
 /** Tool-call admissions are keyed by host tool-call id and consumed by `execute`. */
 const MAX_TOOL_CALL_ADMISSIONS = 256;
@@ -67,11 +71,30 @@ function log(api: Pick<GuardHostApi, "logger">, hook: string, outcome: string, r
 /** The one main-owner-run predicate every owner-only controller action shares. */
 function isMainOwnerRun(admission: Admission): admission is MainOwnerAdmission {
   return admission.owner && admission.agentId === "main" &&
-    ownerRunKey(admission.sessionKey, admission.runId) !== undefined;
+    ownerRunKey(admission.ownerSessionKey, admission.runId) !== undefined;
 }
 
 function isOwnerSession(entry: ActiveLease, admission: Admission): boolean {
-  return isMainOwnerRun(admission) && admission.sessionKey === entry.ownerSessionKey;
+  return isMainOwnerRun(admission) && admission.ownerSessionKey === entry.ownerSessionKey;
+}
+
+/** Bind policy admission to the same host session despite canonical/runtime key projection. */
+function matchesExecutionSession(admission: Admission, ctx: PluginToolContext): boolean {
+  if (ctx.agentId !== admission.agentId) return false;
+  if (admission.sessionId !== undefined || ctx.sessionId !== undefined) {
+    return typeof admission.sessionId === "string" && admission.sessionId.length > 0 &&
+      typeof ctx.sessionId === "string" && ctx.sessionId.length > 0 &&
+      admission.sessionId === ctx.sessionId;
+  }
+  return ctx.sessionKey === admission.executionSessionKey;
+}
+
+/** Destructive cleanup accepts either exact session projection for the exact run. */
+function admissionEnded(admission: Admission, ctx: AgentHookContext, runId: unknown): boolean {
+  if (typeof runId !== "string" || runId.length === 0 || admission.runId !== runId) return false;
+  return admission.executionSessionKey === ctx.sessionKey || admission.ownerSessionKey === ctx.sessionKey ||
+    typeof admission.sessionId === "string" && admission.sessionId.length > 0 &&
+      admission.sessionId === ctx.sessionId;
 }
 
 const CONTROLLER_OUTPUT_SCHEMA = {
@@ -153,12 +176,18 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
         if (admissions.size >= MAX_TOOL_CALL_ADMISSIONS) {
           admissions.delete(admissions.keys().next().value as string);
         }
+        const ownerRun = ctx.agentId === "main"
+          ? ownerRuns.resolve(ctx.sessionKey, ctx.runId, ctx.sessionId)
+          : undefined;
         admissions.set(event.toolCallId, {
           ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
-          ...(ctx.sessionKey === undefined ? {} : { sessionKey: ctx.sessionKey }),
+          ...(ctx.sessionKey === undefined ? {} : { executionSessionKey: ctx.sessionKey }),
+          ...((ownerRun?.sessionKey ?? ctx.sessionKey) === undefined
+            ? {} : { ownerSessionKey: ownerRun?.sessionKey ?? ctx.sessionKey }),
+          ...(ctx.sessionId === undefined ? {} : { sessionId: ctx.sessionId }),
           ...(ctx.runId === undefined ? {} : { runId: ctx.runId }),
           owner: resolveOwnerAuthority(ctx.requester?.senderIsOwner,
-            ctx.agentId === "main" && ownerRuns.has(ctx.sessionKey, ctx.runId)),
+            ownerRun !== undefined),
         });
         return;
       }
@@ -203,7 +232,8 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
       if (!admission) return toolResult({ status: "error", code: ReasonCodes.ControllerCallerInvalid });
       const params = object(raw);
       try {
-        if (ctx.agentId !== admission.agentId || ctx.sessionKey !== admission.sessionKey) {
+        if (!matchesExecutionSession(admission, ctx) ||
+            admission.owner && ctx.senderIsOwner !== undefined && ctx.senderIsOwner !== true) {
           throw new Error(ReasonCodes.ControllerCallerInvalid);
         }
         const action = string(params.action);
@@ -226,7 +256,7 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           if (!isMainOwnerRun(admission)) throw new Error(ReasonCodes.ControllerCallerInvalid);
           const destination = object(params.destination) as LeaseDestination;
           const previousOwnerRunId = registry.getByToken(params.leaseToken)?.ownerRunId;
-          const lease = registry.register({ leaseToken: string(params.leaseToken), ownerSessionKey: admission.sessionKey,
+          const lease = registry.register({ leaseToken: string(params.leaseToken), ownerSessionKey: admission.ownerSessionKey,
             ownerRunId: admission.runId, transportFile: string(params.transportFile),
             processHandle: string(params.processHandle), jobId: string(params.jobId), destination,
             reportPumpEntry: string(params.reportPumpEntry), hostTransportEntry: string(params.hostTransportEntry),
@@ -239,7 +269,7 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           return toolResult({ status: "prepared" });
         }
         if (!entry) throw new Error(ReasonCodes.ControllerLeaseNotFound);
-        const cron = controller.callerMatchesCron(entry, admission.agentId, admission.sessionKey);
+        const cron = controller.callerMatchesCron(entry, admission.agentId, admission.executionSessionKey);
         const ownerSession = isOwnerSession(entry, admission);
         if (action === "commit_activation") {
           if (!ownerSession) throw new Error(ReasonCodes.ControllerCallerInvalid);
@@ -265,8 +295,8 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           return toolResult({ status: "released" });
         }
         if (action === "tick") {
-          if (!cron || !admission.sessionKey) throw new Error(ReasonCodes.ControllerCallerInvalid);
-          return toolResult(await controller.tick(entry, admission.sessionKey));
+          if (!cron || !admission.executionSessionKey) throw new Error(ReasonCodes.ControllerCallerInvalid);
+          return toolResult(await controller.tick(entry, admission.executionSessionKey));
         }
         throw new Error(ReasonCodes.ControllerActionInvalid);
       } catch (error) {
@@ -289,11 +319,11 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
         const run = object(ctx);
         if (run.agentId === "main") {
           if (object(event).senderIsOwner === true) {
-            if (ownerRuns.admit(run.sessionKey, run.runId)) {
+            if (ownerRuns.admit(run.sessionKey, run.runId, run.sessionId)) {
               log(api, "before_agent_run", "evicted", ReasonCodes.ControllerOwnerRunEvicted);
             }
           } else {
-            ownerRuns.revoke(run.sessionKey, run.runId);
+            ownerRuns.revoke(run.sessionKey, run.runId, run.sessionId);
           }
         }
       } catch {
@@ -334,10 +364,10 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
       // Authority must not outlive its run: revoke the owner admission first,
       // then drop tool admissions the run computed but never executed, so a
       // controller call still in flight at agent_end fails closed.
-      ownerRuns.revoke(ctx.sessionKey, runId);
-      if (ctx.sessionKey !== undefined && runId !== undefined) {
+      ownerRuns.revoke(ctx.sessionKey, runId, ctx.sessionId);
+      if (runId !== undefined) {
         for (const [toolCallId, admission] of admissions) {
-          if (admission.sessionKey === ctx.sessionKey && admission.runId === runId) {
+          if (admissionEnded(admission, ctx, runId)) {
             admissions.delete(toolCallId);
           }
         }

@@ -14,9 +14,10 @@
  *     registers all controller and migration handlers, and exposes exactly one
  *     controller tool plus one scoped trusted-tool policy. The installed hook
  *     runtime plus the installed harness tool wrapper bridge one host-proven
- *     direct Discord owner event into a requester-less controller registration,
- *     preserve an explicit non-owner denial, and revoke the bridge at
- *     `agent_end`. The shipped report automation's executable result is
+ *     direct Discord owner event across the canonical and projected runtime
+ *     session keys into a requester-less controller registration, preserve an
+ *     explicit non-owner denial, and revoke the bridge at `agent_end`. The
+ *     shipped report automation's executable result is
  *     accepted by the installed scheduler parser, while the formerly emitted
  *     null result is rejected.
  *  2. A canonical completion report carrying seconds (`17분 31초`) survives the
@@ -595,8 +596,14 @@ async function main(): Promise<void> {
     assert.equal(defaultRegistration.policies.length, 1, "scoped trusted tool policy registered");
     const controllerFactory = defaultRegistration.tools[0] as
       (ctx: Record<string, unknown>) => Record<string, unknown>;
-    const controllerTool = controllerFactory({ agentId: "main",
-      sessionKey: "agent:main:discord:smoke-owner" });
+    const ownerSessionId = "smoke-owner-session-id";
+    const controllerTool = controllerFactory({
+      agentId: "main",
+      sessionKey: "agent:main:sandbox:smoke-owner",
+      sessionId: ownerSessionId,
+      requesterSenderId: "smoke-owner-sender-id",
+      senderIsOwner: true,
+    });
     assert.equal(controllerTool.name, "acp_report_controller");
     assert.ok(controllerTool.outputSchema,
       "the installed 2026.8.1 tool catalog requires a declared details schema for deterministic script field use");
@@ -625,6 +632,7 @@ async function main(): Promise<void> {
     const ownerRunContext = {
       agentId: "main",
       sessionKey: "agent:main:discord:smoke-owner",
+      sessionId: ownerSessionId,
       runId: "smoke-owner-run-1",
       trigger: "user",
       channel: "discord",
