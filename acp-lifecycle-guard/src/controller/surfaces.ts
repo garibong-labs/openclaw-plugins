@@ -196,16 +196,16 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
     description: "Bind the ACP report controller and lifecycle completion tools to trusted run context.",
     matcher: [CONTROLLER_TOOL_NAME, "sessions_yield", "message"],
     evaluate(event: BeforeToolCallEvent, ctx): BeforeToolCallResult | void {
+      const agentId = optionalNonEmptyString(ctx.agentId);
+      const run = normalizeRunProjection(ctx);
+      const ownerRun = agentId === "main"
+        ? ownerRuns.resolve(run.sessionKey, run.runId, run.sessionId)
+        : undefined;
       if (event.toolName === CONTROLLER_TOOL_NAME) {
         if (!event.toolCallId) return { block: true, blockReason: ReasonCodes.ControllerCallerInvalid };
         if (admissions.size >= MAX_TOOL_CALL_ADMISSIONS) {
           admissions.delete(admissions.keys().next().value as string);
         }
-        const agentId = optionalNonEmptyString(ctx.agentId);
-        const run = normalizeRunProjection(ctx);
-        const ownerRun = agentId === "main"
-          ? ownerRuns.resolve(run.sessionKey, run.runId, run.sessionId)
-          : undefined;
         const directOwner = directOwnerSessionKey(ctx, run);
         const ownerSessionKey = ownerRun?.sessionKey ?? directOwner;
         admissions.set(event.toolCallId, {
@@ -236,8 +236,12 @@ export function createControllerSurfaces(api: GuardHostApi): ControllerSurfaces 
           return { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion };
         }
       }
-      const leases = registry.leasesForOwner(ctx.sessionKey, ctx.runId);
-      if (leases.length === 0) return;
+      const leases = registry.leasesForOwner(ownerRun?.sessionKey ?? run.sessionKey, run.runId);
+      // A projected key with missing or mismatched alias proof must not turn a
+      // known owner run into an early-completion bypass. Run ids are host-owned
+      // and exact; this fallback only blocks, never grants controller access.
+      const completionLeases = leases.length > 0 ? leases : registry.leasesForOwnerRun(run.runId);
+      if (completionLeases.length === 0) return;
       // `params` is declared non-optional but is defensively narrowed
       // everywhere else in this plugin; a throwing policy is not a safe way to
       // read one optional flag.

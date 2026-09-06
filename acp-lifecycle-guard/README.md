@@ -31,11 +31,24 @@ Without that grant the loader blocks `before_agent_run`,
 `before_agent_finalize`, and `agent_end` with the bounded diagnostic
 `typed hook "<hook>" blocked because non-bundled plugins must set plugins.entries.acp-lifecycle-guard.hooks.allowConversationAccess=true`.
 Do not treat that state as fully functional. An isolated runtime inspect of the
-granted configuration must show `acp_report_controller` in `toolNames`, all
-expected typed hook registrations, and no tool-registration error or blocked
-hook diagnostic. Applying this
+granted configuration must show plugin/package version `0.6.4` or newer,
+`status:"loaded"`, `activated:true`, `acp_report_controller` in both
+`contracts.tools` and `toolNames`, the trusted policy contract, all expected
+typed hook registrations, and no tool-registration error or blocked hook
+diagnostic. These are the existing OpenClaw plugin-info/loader fields; the
+plugin adds no parallel preflight API. Applying this
 configuration and restarting a Gateway are deliberate operator rollout steps;
 this package never edits live configuration or restarts services.
+
+### Upgrade compatibility
+
+Upgrade from `0.6.3` to `0.6.4` only with no in-flight controller leases and no
+armed controller automation. Version `0.6.3` could persist a projected owner
+session key but did not persist the ephemeral `sessionId`, so after a Gateway
+restart there is no exact proof that can safely rewrite that lease to the
+canonical key. Version `0.6.4` intentionally refuses that migration rather than
+weakening the owner fence. Complete or explicitly recover the old lifecycle on
+the old version, verify the private lease registry is empty, then upgrade.
 
 ## Controller contract
 
@@ -78,10 +91,13 @@ The controller exposes six closed actions through one plugin tool:
 - `status`: available to an authenticated `main` owner run in the exact
   registered owner session, or to the exact bound cron session. This permits
   inspection after the registering run has ended without widening sessions.
-- `tick`: available only to `main` running as the exact `cron:<jobId>` session.
-  A prepared lease returns a stable error and cannot publish. Once active it
-  imports the attested skills pump in-process and returns either a one-shot
-  opaque publication token, `none_due`, or a terminal control status.
+- `tick`: available only to `main` running as the exact bound cron session. The
+  accepted closed forms are `cron:<jobId>`, OpenClaw 2026.8.1 script payload's
+  `cron:<jobId>:trigger`, and `cron:<jobId>:run:<run>` (with the optional exact
+  `agent:main:` prefix); arbitrary suffixes remain denied. A prepared lease
+  returns a stable error and cannot publish. Once active it imports the
+  attested skills pump in-process and returns either a one-shot opaque
+  publication token, `none_due`, or a terminal control status.
 - `release`: available after `terminal_acked` or `tracking_lost` to an
   authenticated `main` owner run in the exact registered owner session, or to
   the bound cron session. Active manual release is explicitly denied.
@@ -273,7 +289,11 @@ The manifest declares the scoped trusted policy
 `acp-report-controller-lifecycle-v1`. It applies only to
 `acp_report_controller`, `sessions_yield`, and `message`:
 
-- `sessions_yield` is blocked for the exact owner run while its lease is prepared or active.
+- `sessions_yield` is blocked for the exact owner run while its lease is
+  prepared or active. A policy hook carrying the runtime projection resolves
+  through the same exact owner-run admission; missing or mismatched alias proof
+  falls back only to the exact host run id as a conservative block, never as a
+  controller grant.
 - `message(final:true)` and an omitted `final` are blocked; required lifecycle
   publication uses the one-shot token with `message(final:false)`. A raw or
   replayed message call from the bound cron job is blocked.

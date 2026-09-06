@@ -486,6 +486,14 @@ async function main(): Promise<void> {
 
     const grantedInspect = inspectStagedRuntime(openclawRoot, workspace, true);
     const grantedPlugin = grantedInspect.plugin as Record<string, unknown>;
+    assert.equal(grantedPlugin.version, "0.6.4");
+    assert.equal(grantedPlugin.packageVersion, "0.6.4");
+    assert.equal(grantedPlugin.status, "loaded");
+    assert.equal(grantedPlugin.activated, true);
+    assert.deepEqual(grantedPlugin.contracts, {
+      tools: ["acp_report_controller"],
+      trustedToolPolicies: ["acp-report-controller-lifecycle-v1"],
+    });
     assert.deepEqual(grantedPlugin.toolNames, ["acp_report_controller"]);
     assert.deepEqual((grantedInspect.typedHooks as Array<Record<string, unknown>>)
       .map((hook) => hook.name).sort(),

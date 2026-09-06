@@ -16,6 +16,16 @@ plugin is versioned independently of the repository and follows
   without a `before_agent_run` admission cannot become the durable lease owner.
 - Keep explicit non-owner verdicts authoritative, reject cross-session and
   cross-run transfers, and revoke projected-key admissions at `agent_end`.
+- Accept OpenClaw 2026.8.1's exact `cron:<jobId>:trigger` script-runtime session
+  while continuing to reject every unrecognized suffix, and cover tick plus
+  one-shot message injection on that production shape.
+- Resolve early-completion policy checks through the exact owner-run admission;
+  when a projected alias is missing or mismatched, the exact host run id can
+  conservatively block completion but can never grant controller authority.
+- Require an empty controller registry for `0.6.3` → `0.6.4` upgrades: legacy
+  projected-key leases do not contain durable session-id proof and are not
+  silently migrated. Pin the existing plugin-info fields used by runtime
+  preflight without adding another API.
 
 ## [0.6.3] - 2026-09-06
 

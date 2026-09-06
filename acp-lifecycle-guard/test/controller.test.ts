@@ -446,8 +446,15 @@ describe("controller caller and delivery binding", () => {
     const entry = register(registry, f);
     const controller = new ReportController(registry);
     assert.equal(controller.callerMatchesCron(entry, "main", "agent:main:cron:job-example-1:run:tick-1"), true);
+    assert.equal(controller.callerMatchesCron(entry, "main", "agent:main:cron:job-example-1:trigger"), true);
     assert.equal(controller.callerMatchesCron(entry, "helper", "agent:main:cron:job-example-1:run:tick-1"), false);
     assert.equal(controller.callerMatchesCron(entry, "main", "agent:main:cron:job-example-2:run:tick-1"), false);
+    for (const widened of [
+      "agent:main:cron:job-example-1:trigger:extra",
+      "agent:main:cron:job-example-1:run:tick-1:trigger",
+      "agent:main:cron:job-example-1:failure",
+      "agent:main:cron:job-example-1:triggered",
+    ]) assert.equal(controller.callerMatchesCron(entry, "main", widened), false);
   });
 
   for (const [label, mutate] of [
@@ -755,8 +762,9 @@ describe("receipt time and lifecycle enforcement", () => {
     const surfaces = createControllerSurfaces(api);
     const entry = register(surfaces.registry, f);
     await activate(surfaces.registry, entry);
+    // OpenClaw 2026.8.1 script payload tools use this exact `:trigger` form.
     const cronCtx = { toolName: "acp_report_controller", agentId: "main",
-      sessionKey: "agent:main:cron:job-example-1:run:tick-1" };
+      sessionKey: "agent:main:cron:job-example-1:trigger" };
     policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "tick-example",
       params: { action: "tick" } }, cronCtx);
     const tickResult = await toolFactory!(cronCtx).execute("tick-example", {
@@ -1193,6 +1201,93 @@ describe("host-proven controller owner-run admission", () => {
       action: "status", leaseToken,
     })).details, { status: "error", code: ReasonCodes.ControllerCallerInvalid },
     "agent_end revokes the owner bridge across both session-key projections");
+    assert.ok(h.logs.every(contentFree));
+  });
+
+  it("blocks owner completion through a projected policy key and fails closed when its alias proof is absent", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const registration = registrationParams(f);
+    const runtimeSessionKey = "agent:main:sandbox:example-owner";
+    const runId = "owner-run-example-policy-projection";
+    h.surfaces.beforeAgentRun({ prompt: "owner request", messages: [], senderIsOwner: true }, {
+      agentId: "main", sessionKey, sessionId, runId,
+    });
+    const controllerContext: ToolHookContext = {
+      toolName: "acp_report_controller",
+      toolCallId: "projected-policy-register",
+      agentId: "main",
+      sessionKey: runtimeSessionKey,
+      sessionId,
+      runId,
+    };
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "projected-policy-register",
+      params: registration,
+    }, controllerContext);
+    assert.deepEqual((await h.toolFactory({
+      agentId: "main", sessionKey: runtimeSessionKey, sessionId, senderIsOwner: true,
+    }).execute("projected-policy-register", registration)).details, { status: "prepared" });
+
+    const completionContext: ToolHookContext = {
+      toolName: "sessions_yield",
+      agentId: "main",
+      sessionKey: runtimeSessionKey,
+      sessionId,
+      runId,
+    };
+    assert.deepEqual(h.policy.evaluate({ toolName: "sessions_yield", params: {} }, completionContext),
+      { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion });
+    assert.deepEqual(h.policy.evaluate({ toolName: "message", params: { final: true } }, {
+      ...completionContext, toolName: "message",
+    }), { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion });
+    assert.equal(h.policy.evaluate({ toolName: "message", params: { final: false } }, {
+      ...completionContext, toolName: "message",
+    }), undefined, "required non-final lifecycle publication remains allowed");
+
+    assert.deepEqual(h.policy.evaluate({ toolName: "sessions_yield", params: {} }, {
+      ...completionContext,
+      sessionId: "other-ephemeral-session",
+    }), { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion },
+    "the exact run fence blocks completion when the projected alias is unproven");
+    assert.equal(h.policy.evaluate({ toolName: "sessions_yield", params: {} }, {
+      ...completionContext,
+      runId: `${runId}-other`,
+    }), undefined, "an unrelated run remains untouched");
+    assert.ok(h.logs.every(contentFree));
+  });
+
+  it("does not migrate a legacy projected-key lease without durable session proof", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const runtimeSessionKey = "agent:main:sandbox:example-owner";
+    const runId = "owner-run-example-legacy-projected";
+    const legacy = register(h.surfaces.registry, f, {
+      ownerSessionKey: runtimeSessionKey,
+      ownerRunId: runId,
+    });
+    h.surfaces.beforeAgentRun({ prompt: "owner request", messages: [], senderIsOwner: true }, {
+      agentId: "main", sessionKey, sessionId, runId,
+    });
+    const params = { action: "status", leaseToken };
+    h.policy.evaluate({ toolName: "acp_report_controller", toolCallId: "legacy-owner-status", params }, {
+      toolName: "acp_report_controller",
+      toolCallId: "legacy-owner-status",
+      agentId: "main",
+      sessionKey: runtimeSessionKey,
+      sessionId,
+      runId,
+    });
+    assert.deepEqual((await h.toolFactory({
+      agentId: "main", sessionKey: runtimeSessionKey, sessionId, senderIsOwner: true,
+    }).execute("legacy-owner-status", params)).details,
+    { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    assert.equal(h.surfaces.registry.getByToken(leaseToken), legacy,
+      "the guard must not silently rewrite legacy ownership without persisted session evidence");
+    assert.equal(h.surfaces.beforeAgentFinalize({ sessionId, stopHookActive: false }, {
+      agentId: "main", sessionKey, sessionId, runId,
+    }), undefined, "a canonical lookup cannot prove ownership of the legacy projected lease");
     assert.ok(h.logs.every(contentFree));
   });
 
