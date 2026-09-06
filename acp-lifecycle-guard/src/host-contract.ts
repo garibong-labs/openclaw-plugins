@@ -75,11 +75,9 @@ export type ToolHookContext = {
   toolCallId?: string;
   channelId?: string;
   requester?: {
+    /** Trusted requester channel used to validate a canonical direct-owner session key. */
     channel?: string;
-    accountId?: string;
-    senderId?: string;
     senderIsOwner?: boolean;
-    roleIds?: readonly string[];
   };
 };
 

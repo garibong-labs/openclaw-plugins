@@ -42,17 +42,20 @@ this package never edits live configuration or restarts services.
 The controller exposes six closed actions through one plugin tool:
 
 - `register`: main-owner only. The trusted tool requester may prove ownership
-  directly. When a bridged tool call omits that optional requester bit, the
-  controller accepts only a host-proven `before_agent_run` owner admission
-  bound to the exact `main` agent, ephemeral session, and run. OpenClaw's
-  canonical run session key and projected sandbox/runtime tool session key are
-  treated as aliases only when that exact ephemeral session id and run id
-  match. An explicit non-owner bit is never overridden, and the bridge is
-  revoked at `agent_end` together with any tool admission that run computed but
-  never executed. Registration binds an opaque lease token to the exact owner
-  session/run, ACP transport file
-  and process handle, report-pump job, Discord conversation/account, and
-  attested skills pump/transport entries. It persists the lease in `prepared`;
+  directly only when the policy carries a concrete canonical key in its own
+  `agent:main:<requester-channel>:...` namespace; an arbitrary projected policy
+  key never becomes the durable owner. A projected or requester-less policy
+  call instead needs a host-proven `before_agent_run` owner admission bound to
+  the exact `main` agent, ephemeral session, and run. OpenClaw's canonical run
+  session key and projected sandbox/runtime tool session key are aliases only
+  when both are concrete `main` keys carrying the exact same non-empty
+  ephemeral session id and run id. Empty optional ids normalize to absence;
+  one-sided ids fail closed for authorization. An explicit non-owner bit is
+  never overridden, and the bridge is revoked at `agent_end` together with any
+  tool admission that run computed but never executed. Registration binds an
+  opaque lease token to the exact owner session/run, ACP transport file and
+  process handle, report-pump job, Discord conversation/account, and attested
+  skills pump/transport entries. It persists the lease in `prepared`;
   registration never authorizes a pump.
 - `commit_activation`: main-owner only in the exact registered owner session,
   including a fresh authenticated run. It takes only `action` and `leaseToken`.
@@ -284,15 +287,18 @@ The manifest declares the scoped trusted policy
 `main` agent, canonical session, ephemeral session, and run; requester-less
 bridged `acp_report_controller` calls in that run use it. OpenClaw 2026.8.1 may
 project a different sandbox/runtime session key into the tool surface, so the
-bridge resolves that key only through the same non-empty ephemeral session id
-and exact run id, while the canonical owner session remains on the lease. The
-handler fails open and always returns the explicit pass decision, and
-bounded-cap eviction of an admission is logged as one content-free
-`owner_run_evicted` line. The admission is per host run. OpenClaw 2026.8.1
-fingerprints `senderIsOwner` when steering an active run and queues an
+bridge resolves that key only between two concrete `main` keys carrying the
+same non-empty ephemeral session id and exact run id, while the canonical owner
+session remains on the lease. Empty optional ids are absent, a one-sided id
+cannot authorize an alias, and exact-key revocation may still delete authority
+on partial end evidence. The handler fails open and always returns the explicit
+pass decision, and bounded-cap eviction of an admission is logged as one
+content-free `owner_run_evicted` line. The admission is per host run. OpenClaw
+2026.8.1 fingerprints `senderIsOwner` when steering an active run and queues an
 authority-mismatched follow-up into a separate run, so another sender cannot
-inherit the admitted owner's controller authority. The plugin still requires
-the exact host-proven owner admission on every run that drives the controller.
+inherit the admitted owner's controller authority. Every controller-driving
+run therefore needs either that exact owner admission or the canonical trusted
+requester proof described above.
 
 OpenClaw's ordinary `agent_end` hook is observational and has no cancellation
 result. The plugin therefore cannot cancel an end after the host's bounded

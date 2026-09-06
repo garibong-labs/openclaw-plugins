@@ -9,8 +9,11 @@ import { fileURLToPath } from "node:url";
 import { createControllerSurfaces } from "../src/controller/surfaces.ts";
 import {
   MAX_OWNER_RUN_ADMISSIONS,
+  normalizeRunProjection,
   OwnerRunAdmissions,
   resolveOwnerAuthority,
+  revokesRunProjection,
+  sessionProjectionRelation,
 } from "../src/controller/owner-runs.ts";
 import {
   LeaseRegistry,
@@ -639,7 +642,7 @@ describe("receipt time and lifecycle enforcement", () => {
     const surfaces = createControllerSurfaces(api);
     const owner = { toolName: "acp_report_controller", agentId: "main",
       sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-1",
-      requester: { senderIsOwner: true } };
+      requester: { channel: "discord", senderIsOwner: true } };
     const registration = {
       action: "register", leaseToken: "lease-token-example-00000001", transportFile: f.transport,
       processHandle: "process-example-1", jobId: "job-example-1",
@@ -826,7 +829,7 @@ describe("receipt time and lifecycle enforcement", () => {
     };
     const freshOwner = { toolName: "acp_report_controller", agentId: "main",
       sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-2",
-      requester: { senderIsOwner: true } };
+      requester: { channel: "discord", senderIsOwner: true } };
     const status = await invoke("fresh-status", freshOwner, "status");
     assert.deepEqual(status.details, { status: "terminal_acked",
       cleanup: "remove_current_job_then_release_lease" });
@@ -841,7 +844,7 @@ describe("receipt time and lifecycle enforcement", () => {
     const wrongAgent = await invoke("wrong-agent", { ...freshOwner, agentId: "helper" }, "status");
     assert.equal((wrongAgent.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
     const wrongAgentRelease = await invoke("wrong-agent-release", { ...freshOwner, agentId: "helper" }, "release");
-    assert.equal((wrongAgentRelease.details as Record<string, unknown>).code, ReasonCodes.ControllerReleaseDenied);
+    assert.equal((wrongAgentRelease.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
     const unauthenticated = await invoke("unauthenticated", { ...freshOwner,
       requester: { senderIsOwner: false } }, "status");
     assert.equal((unauthenticated.details as Record<string, unknown>).code, ReasonCodes.ControllerCallerInvalid);
@@ -876,7 +879,7 @@ describe("receipt time and lifecycle enforcement", () => {
       fs.unlinkSync(f.transport);
       const owner = { toolName: "acp_report_controller", agentId: "main",
         sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-2",
-        requester: { senderIsOwner: true } };
+        requester: { channel: "discord", senderIsOwner: true } };
       policy!.evaluate({ toolName: "acp_report_controller", toolCallId: `release-${cleanupState}`,
         params: { action: "release" } }, owner);
       const released = await toolFactory!(owner).execute(`release-${cleanupState}`,
@@ -902,7 +905,7 @@ describe("receipt time and lifecycle enforcement", () => {
     await activate(surfaces.registry, entry);
     const owner = { toolName: "acp_report_controller", agentId: "main",
       sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-1",
-      requester: { senderIsOwner: true } };
+      requester: { channel: "discord", senderIsOwner: true } };
     fs.unlinkSync(f.transport);
     policy!.evaluate({ toolName: "acp_report_controller", toolCallId: "active-release", params: {} }, owner);
     const result = await toolFactory!(owner).execute("active-release",
@@ -926,7 +929,7 @@ describe("receipt time and lifecycle enforcement", () => {
     const surfaces = createControllerSurfaces(api);
     const originalOwner = { toolName: "acp_report_controller", agentId: "main",
       sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-1",
-      requester: { senderIsOwner: true } };
+      requester: { channel: "discord", senderIsOwner: true } };
     const invoke = async (id: string, ctx: Record<string, unknown>, params: Record<string, unknown>) => {
       policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id, params }, ctx);
       return toolFactory!(ctx).execute(id, params);
@@ -1015,7 +1018,7 @@ describe("receipt time and lifecycle enforcement", () => {
     const entry = register(surfaces.registry, f);
     const owner = { toolName: "acp_report_controller", agentId: "main",
       sessionKey: "agent:main:discord:example-owner", runId: "owner-run-example-2",
-      requester: { senderIsOwner: true } };
+      requester: { channel: "discord", senderIsOwner: true } };
     const invokeAbort = async (id: string, ctx: Record<string, unknown> = owner) => {
       policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id,
         params: { action: "abort_preactivation" } }, ctx);
@@ -1025,7 +1028,7 @@ describe("receipt time and lifecycle enforcement", () => {
     };
     const crossAgent = await invokeAbort("abort-cross-agent", { ...owner, agentId: "helper" });
     assert.equal((crossAgent.details as Record<string, unknown>).code,
-      ReasonCodes.ControllerPreactivationAbortDenied);
+      ReasonCodes.ControllerCallerInvalid);
     for (const evidence of ["activation_confirmed", "started", "activity", "terminal_intent", "uncertain"]) {
       (globalThis as Record<string, unknown>).__acpControllerAbort = evidence;
       const denied = await invokeAbort(`abort-after-${evidence}`);
@@ -1051,7 +1054,8 @@ describe("host-proven controller owner-run admission", () => {
   const leaseToken = "lease-token-example-00000001";
   const contentFree = (line: string): boolean =>
     !line.includes("example-owner") && !line.includes("owner-run") && !line.includes("lease-token") &&
-    !line.includes("owner request") && !line.includes("owner recovery");
+    !line.includes("owner request") && !line.includes("owner recovery") &&
+    !line.includes("owner-sender");
 
   function bridgedInvoke(h: ReturnType<typeof surfacesHarness>) {
     return async (id: string, runId: string, params: Record<string, unknown>, senderIsOwner?: boolean) => {
@@ -1117,7 +1121,7 @@ describe("host-proven controller owner-run admission", () => {
     assert.ok(h.logs.every(contentFree));
   });
 
-  it("bridges a direct Discord owner across the host run and runtime tool session keys", async () => {
+  it("bridges the built-in policy's runtime key to the canonical owner run", async () => {
     const f = fixture();
     const h = surfacesHarness(f);
     const registration = registrationParams(f);
@@ -1144,9 +1148,10 @@ describe("host-proven controller owner-run admission", () => {
       agentId: "main",
       sessionKey: runtimeSessionKey,
       sessionId,
-      requesterSenderId: "owner-sender-example",
       senderIsOwner: true,
     };
+    // The built-in OpenClaw harness wraps tools with its runtime projection;
+    // before_agent_run still carries the canonical session key above.
     const policyContext: ToolHookContext = {
       toolName: "acp_report_controller",
       toolCallId: "split-session-register",
@@ -1188,14 +1193,138 @@ describe("host-proven controller owner-run admission", () => {
       action: "status", leaseToken,
     })).details, { status: "error", code: ReasonCodes.ControllerCallerInvalid },
     "agent_end revokes the owner bridge across both session-key projections");
+    assert.ok(h.logs.every(contentFree));
   });
 
-  it("binds an explicit direct-owner policy call to the same ephemeral session across split keys", async () => {
+  it("does not persist an explicit-owner projected key without a canonical owner admission", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const registration = registrationParams(f);
+    const runtimeSessionKey = "agent:main:sandbox:example-owner";
+    const runId = "owner-run-example-projected-only";
+    const policyContext: ToolHookContext = {
+      toolName: "acp_report_controller",
+      toolCallId: "projected-only-register",
+      agentId: "main",
+      sessionKey: runtimeSessionKey,
+      sessionId,
+      runId,
+      requester: { channel: "discord", senderIsOwner: true },
+    };
+    h.policy.evaluate({
+      toolName: "acp_report_controller",
+      toolCallId: "projected-only-register",
+      params: registration,
+    }, policyContext);
+    assert.deepEqual((await h.toolFactory({
+      agentId: "main",
+      sessionKey: runtimeSessionKey,
+      sessionId,
+      senderIsOwner: true,
+    }).execute("projected-only-register", registration)).details,
+    { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    assert.equal(h.surfaces.registry.getByToken(leaseToken), undefined,
+      "an unproven projected key must never become the durable owner session");
+    assert.ok(h.logs.every(contentFree));
+  });
+
+  it("requires a concrete main-agent key even when session and run ids match", async () => {
+    for (const policySessionKey of [undefined, "", "agent:other:discord:example-owner"]) {
+      const f = fixture();
+      const h = surfacesHarness(f);
+      const registration = registrationParams(f);
+      const runtimeSessionKey = "agent:main:sandbox:example-owner";
+      const runId = "owner-run-example-key-required";
+      h.surfaces.beforeAgentRun({ prompt: "owner request", messages: [], senderIsOwner: true }, {
+        agentId: "main", sessionKey, sessionId, runId,
+      });
+      const toolCallId = `missing-key-${String(policySessionKey)}`;
+      h.policy.evaluate({ toolName: "acp_report_controller", toolCallId, params: registration }, {
+        toolName: "acp_report_controller",
+        toolCallId,
+        agentId: "main",
+        ...(policySessionKey === undefined ? {} : { sessionKey: policySessionKey }),
+        sessionId,
+        runId,
+      });
+      assert.deepEqual((await h.toolFactory({
+        agentId: "main", sessionKey: runtimeSessionKey, sessionId, senderIsOwner: true,
+      }).execute(toolCallId, registration)).details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+      assert.equal(h.surfaces.registry.getByToken(leaseToken), undefined);
+      assert.ok(h.logs.every(contentFree));
+    }
+  });
+
+  it("normalizes empty session ids as absent and rejects one-sided session ids", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const registration = registrationParams(f);
+    const runId = "owner-run-example-empty-session";
+    const invoke = async (toolCallId: string, policySessionId: string | undefined,
+      toolSessionId: string | undefined, params: Record<string, unknown>) => {
+      const policyContext: ToolHookContext = {
+        toolName: "acp_report_controller",
+        toolCallId,
+        agentId: "main",
+        sessionKey,
+        ...(policySessionId === undefined ? {} : { sessionId: policySessionId }),
+        runId,
+        requester: { channel: "discord", senderIsOwner: true },
+      };
+      h.policy.evaluate({ toolName: "acp_report_controller", toolCallId, params }, policyContext);
+      return h.toolFactory({
+        agentId: "main",
+        sessionKey,
+        ...(toolSessionId === undefined ? {} : { sessionId: toolSessionId }),
+        senderIsOwner: true,
+      }).execute(toolCallId, params);
+    };
+
+    assert.deepEqual((await invoke("empty-session-register", "", "", registration)).details,
+      { status: "prepared" }, "empty optional ids must behave as absent on both sides");
+    for (const [toolCallId, policySessionId, toolSessionId] of [
+      ["policy-session-only", sessionId, undefined],
+      ["tool-session-only", undefined, sessionId],
+      ["empty-vs-present", "", sessionId],
+      ["present-vs-empty", sessionId, ""],
+    ] as const) {
+      assert.deepEqual((await invoke(toolCallId, policySessionId, toolSessionId, {
+        action: "status", leaseToken,
+      })).details, { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    }
+    assert.ok(h.logs.every(contentFree));
+  });
+
+  it("drops an empty-run tool admission when the id-less run ends", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const toolCallId = "empty-run-pending-call";
+    const params = { action: "status", leaseToken };
+    h.policy.evaluate({ toolName: "acp_report_controller", toolCallId, params }, {
+      toolName: "acp_report_controller",
+      toolCallId,
+      agentId: "main",
+      sessionKey,
+      runId: "",
+    });
+    h.surfaces.agentEnd({ runId: "", messages: [], success: true }, {
+      agentId: "main", sessionKey, runId: "",
+    });
+    assert.deepEqual((await h.toolFactory({ agentId: "main", sessionKey }).execute(
+      toolCallId, params)).details,
+    { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    assert.ok(h.logs.every(contentFree));
+  });
+
+  it("binds the Codex host policy's canonical owner key to its runtime tool projection", async () => {
     const f = fixture();
     const h = surfacesHarness(f);
     const registration = registrationParams(f);
     const runtimeSessionKey = "agent:main:sandbox:example-owner";
     const runId = "owner-run-example-split-2";
+    // The Codex host-capability wrapper supplies the canonical policy key and
+    // the tool factory retains its runtime projection.
     const policyContext: ToolHookContext = {
       toolName: "acp_report_controller",
       toolCallId: "explicit-split-register",
@@ -1205,7 +1334,6 @@ describe("host-proven controller owner-run admission", () => {
       runId,
       requester: {
         channel: "discord",
-        senderId: "owner-sender-example",
         senderIsOwner: true,
       },
     };
@@ -1213,7 +1341,6 @@ describe("host-proven controller owner-run admission", () => {
       agentId: "main",
       sessionKey: runtimeSessionKey,
       sessionId,
-      requesterSenderId: "owner-sender-example",
       senderIsOwner: true,
     };
     h.policy.evaluate({
@@ -1225,7 +1352,6 @@ describe("host-proven controller owner-run admission", () => {
       toolCallId: "explicit-split-non-owner",
       requester: {
         channel: "discord",
-        senderId: "allowlisted-non-owner",
         senderIsOwner: false,
       },
     });
@@ -1267,6 +1393,7 @@ describe("host-proven controller owner-run admission", () => {
       "explicit-split-register", registration)).details, { status: "prepared" });
     assert.equal(h.surfaces.registry.getByToken(leaseToken)?.ownerSessionKey, sessionKey);
     assert.equal(h.surfaces.registry.getByToken(leaseToken)?.ownerRunId, runId);
+    assert.ok(h.logs.every(contentFree));
   });
 
   it("never admits non-main or identity-less runs, revokes on a later non-owner gate, and never throws on the fail-closed gate", async () => {
@@ -1344,6 +1471,30 @@ describe("host-proven controller owner-run admission", () => {
 describe("owner-run admissions", () => {
   const sessionKey = "agent:main:discord:example-owner";
 
+  it("normalizes empty ids and classifies exact, projected, and one-sided sessions", () => {
+    const projectedKey = "agent:main:sandbox:example-owner";
+    assert.deepEqual(normalizeRunProjection({
+      sessionKey,
+      sessionId: "",
+      runId: "",
+    }), { sessionKey });
+    assert.equal(sessionProjectionRelation(
+      { sessionKey, sessionId: "" }, { sessionKey }), "same");
+    assert.equal(sessionProjectionRelation(
+      { sessionKey, sessionId: "owner-session" }, { sessionKey }), "partial");
+    assert.equal(sessionProjectionRelation(
+      { sessionKey }, { sessionKey, sessionId: "owner-session" }), "partial");
+    assert.equal(sessionProjectionRelation(
+      { sessionKey, sessionId: "owner-session" },
+      { sessionKey: projectedKey, sessionId: "owner-session" }), "same");
+    assert.equal(sessionProjectionRelation(
+      { sessionId: "owner-session" },
+      { sessionKey: projectedKey, sessionId: "owner-session" }), "different");
+    assert.equal(sessionProjectionRelation(
+      { sessionKey, sessionId: "owner-session" },
+      { sessionKey: projectedKey, sessionId: "other-session" }), "different");
+  });
+
   it("remembers exact session/run pairs and revokes on any identity the host still provides", () => {
     const admissions = new OwnerRunAdmissions();
     assert.equal(admissions.admit(sessionKey, "owner-run-example-1"), false);
@@ -1370,6 +1521,9 @@ describe("owner-run admissions", () => {
     const sessionId = "owner-session-example-projected";
     assert.equal(admissions.admit(canonicalKey, runId, sessionId), false);
     assert.equal(admissions.resolve(runtimeKey, runId, sessionId)?.sessionKey, canonicalKey);
+    assert.equal(admissions.resolve(undefined, runId, sessionId), undefined);
+    assert.equal(admissions.resolve("", runId, sessionId), undefined);
+    assert.equal(admissions.resolve("agent:other:discord:example-owner", runId, sessionId), undefined);
     assert.equal(admissions.has(runtimeKey, `${runId}-other`, sessionId), false);
     assert.equal(admissions.has(runtimeKey, runId, "other-session"), false);
     assert.equal(admissions.has(runtimeKey, runId), false,
@@ -1378,6 +1532,52 @@ describe("owner-run admissions", () => {
       "a partial identity cannot bypass the ephemeral session fence");
     admissions.revoke(runtimeKey, runId, sessionId);
     assert.equal(admissions.size, 0);
+  });
+
+  it("stores one strongest admission for id-less and id-carrying variants of a run", () => {
+    const admissions = new OwnerRunAdmissions();
+    const runId = "owner-run-example-upgrade";
+    const sessionId = "owner-session-example-upgrade";
+    assert.equal(admissions.admit(sessionKey, runId), false);
+    assert.equal(admissions.admit(sessionKey, runId, sessionId), false);
+    assert.equal(admissions.size, 1);
+    assert.equal(admissions.resolve(sessionKey, runId, sessionId)?.sessionId, sessionId,
+      "the id-carrying proof upgrades the existing exact run admission");
+    assert.equal(admissions.has(sessionKey, runId), false,
+      "a one-sided session id remains insufficient after the upgrade");
+    assert.equal(admissions.admit(sessionKey, runId), false);
+    assert.equal(admissions.size, 1);
+
+    assert.equal(admissions.admit(sessionKey, runId, "conflicting-session"), false);
+    assert.equal(admissions.size, 0,
+      "contradictory ephemeral sessions revoke the old grant and admit neither");
+  });
+
+  it("revokes projected keys symmetrically and exact one-sided identities fail safe", () => {
+    const admissions = new OwnerRunAdmissions();
+    const projectedKey = "agent:main:sandbox:example-owner";
+    const runId = "owner-run-example-revoke";
+    const sessionId = "owner-session-example-revoke";
+    assert.equal(revokesRunProjection(
+      { sessionKey, sessionId, runId },
+      { sessionKey: projectedKey, sessionId, runId }), true);
+    assert.equal(revokesRunProjection(
+      { sessionKey, sessionId, runId }, { sessionKey, runId }), true);
+    assert.equal(revokesRunProjection(
+      { sessionKey, sessionId, runId }, { sessionKey: projectedKey, runId }), false,
+      "a projected key without its shared session id remains unproven");
+
+    admissions.admit(sessionKey, runId, sessionId);
+    admissions.revoke(projectedKey, runId, sessionId);
+    assert.equal(admissions.size, 0);
+    admissions.admit(sessionKey, runId, sessionId);
+    admissions.revoke(sessionKey, runId);
+    assert.equal(admissions.size, 0,
+      "exact-key revocation removes authority even when the end omits sessionId");
+    admissions.admit(sessionKey, runId);
+    admissions.revoke(sessionKey, runId, sessionId);
+    assert.equal(admissions.size, 0,
+      "exact-key revocation removes authority when only the end carries sessionId");
   });
 
   it("evicts only the oldest admission, only past the cap, and reports it", () => {

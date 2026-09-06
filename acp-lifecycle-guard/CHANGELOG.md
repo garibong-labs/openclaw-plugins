@@ -7,8 +7,13 @@ plugin is versioned independently of the repository and follows
 ## [0.6.4] - 2026-09-06
 
 - Reconcile OpenClaw 2026.8.1's canonical run session key with its projected
-  sandbox/runtime tool session key only through the exact shared ephemeral
-  session id and run id, preserving the canonical owner session on the lease.
+  sandbox/runtime tool session key only when two concrete `main` keys carry the
+  exact shared ephemeral session id and run id. Normalize empty optional ids to
+  absence, reject one-sided ids for authorization, and use the same projection
+  relation for owner-run lookup, tool execution, and revocation.
+- Preserve direct trusted-requester recovery only when its policy key is the
+  canonical `agent:main:<requester-channel>:...` key; a projected policy key
+  without a `before_agent_run` admission cannot become the durable lease owner.
 - Keep explicit non-owner verdicts authoritative, reject cross-session and
   cross-run transfers, and revoke projected-key admissions at `agent_end`.
 

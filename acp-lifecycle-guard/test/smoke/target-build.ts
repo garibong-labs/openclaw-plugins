@@ -150,6 +150,13 @@ const SMOKE_CONVERSATION = "smoke-conversation-1";
 const SMOKE_WRONG_CONVERSATION = "smoke-conversation-2";
 const SMOKE_MESSAGE_ID = "smoke-message-1";
 const SMOKE_JOB_ID = "smoke-job-1";
+const SMOKE_OWNER_CANONICAL_SESSION = "agent:main:discord:smoke-owner";
+const SMOKE_OWNER_RUNTIME_SESSION = "agent:main:sandbox:smoke-owner";
+const SMOKE_OWNER_SESSION_ID = "smoke-owner-session-id";
+const SMOKE_OWNER_RUN_ID = "smoke-owner-run-1";
+const SMOKE_OWNER_DIRECT_RUN_ID = "smoke-owner-run-direct";
+const SMOKE_OWNER_PROJECTED_RUN_ID = "smoke-owner-run-projected";
+const SMOKE_OWNER_EMPTY_RUN_ID = "smoke-owner-run-empty-session";
 const SMOKE_SCENARIOS = [
   "default",
   "happy",
@@ -385,6 +392,23 @@ function contentNeedles(): readonly string[] {
     SMOKE_WRONG_CONVERSATION,
     SMOKE_MESSAGE_ID,
     SMOKE_JOB_ID,
+    SMOKE_OWNER_CANONICAL_SESSION,
+    SMOKE_OWNER_RUNTIME_SESSION,
+    SMOKE_OWNER_SESSION_ID,
+    SMOKE_OWNER_RUN_ID,
+    SMOKE_OWNER_DIRECT_RUN_ID,
+    SMOKE_OWNER_PROJECTED_RUN_ID,
+    SMOKE_OWNER_EMPTY_RUN_ID,
+    "smoke-owner-lease-token-0001",
+    "smoke-owner-process-1",
+    "smoke-owner-job-1",
+    "smoke-explicit-non-owner-call",
+    "smoke-owner-register-call",
+    "smoke-owner-explicit-canonical",
+    "smoke-owner-projected-only",
+    "smoke-owner-empty-session",
+    "smoke-owner-one-sided-session",
+    "smoke-owner-revoked-call",
   );
   for (const scenario of SMOKE_SCENARIOS) {
     lines.push(
@@ -596,12 +620,10 @@ async function main(): Promise<void> {
     assert.equal(defaultRegistration.policies.length, 1, "scoped trusted tool policy registered");
     const controllerFactory = defaultRegistration.tools[0] as
       (ctx: Record<string, unknown>) => Record<string, unknown>;
-    const ownerSessionId = "smoke-owner-session-id";
     const controllerTool = controllerFactory({
       agentId: "main",
-      sessionKey: "agent:main:sandbox:smoke-owner",
-      sessionId: ownerSessionId,
-      requesterSenderId: "smoke-owner-sender-id",
+      sessionKey: SMOKE_OWNER_RUNTIME_SESSION,
+      sessionId: SMOKE_OWNER_SESSION_ID,
       senderIsOwner: true,
     });
     assert.equal(controllerTool.name, "acp_report_controller");
@@ -631,9 +653,9 @@ async function main(): Promise<void> {
     }]);
     const ownerRunContext = {
       agentId: "main",
-      sessionKey: "agent:main:discord:smoke-owner",
-      sessionId: ownerSessionId,
-      runId: "smoke-owner-run-1",
+      sessionKey: SMOKE_OWNER_CANONICAL_SESSION,
+      sessionId: SMOKE_OWNER_SESSION_ID,
+      runId: SMOKE_OWNER_RUN_ID,
       trigger: "user",
       channel: "discord",
       channelId: "123456789",
@@ -674,6 +696,83 @@ async function main(): Promise<void> {
     const ownerRegistrationResult = await bridgedTool.execute(
       "smoke-owner-register-call", ownerRegistration);
     assert.deepEqual(ownerRegistrationResult.details, { status: "prepared" });
+
+    // The Codex host-capability wrapper exposes the canonical policy key even
+    // though the tool factory was built against the runtime projection. That
+    // trusted direct-owner path remains available without before_agent_run.
+    const explicitCanonicalTool = agentHarness.wrapToolWithBeforeToolCallHook(
+      controllerAgentTool,
+      {
+        ...ownerRunContext,
+        runId: SMOKE_OWNER_DIRECT_RUN_ID,
+        requester: { channel: "discord", senderIsOwner: true },
+      },
+    );
+    const explicitCanonicalResult = await explicitCanonicalTool.execute(
+      "smoke-owner-explicit-canonical", {
+        action: "status",
+        leaseToken: ownerRegistration.leaseToken,
+      });
+    assert.deepEqual(explicitCanonicalResult.details, { status: "prepared" });
+
+    // A built-in runtime policy key is a projection, not a canonical owner
+    // key. Without the before_agent_run admission it must not own a lease.
+    const projectedOnlyTool = agentHarness.wrapToolWithBeforeToolCallHook(
+      controllerAgentTool,
+      {
+        ...ownerRunContext,
+        sessionKey: SMOKE_OWNER_RUNTIME_SESSION,
+        runId: SMOKE_OWNER_PROJECTED_RUN_ID,
+        requester: { channel: "discord", senderIsOwner: true },
+      },
+    );
+    const projectedOnlyResult = await projectedOnlyTool.execute(
+      "smoke-owner-projected-only", {
+        action: "status",
+        leaseToken: ownerRegistration.leaseToken,
+      });
+    assert.deepEqual(projectedOnlyResult.details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+
+    // Empty optional session ids normalize to absence on both sides. A
+    // one-sided id remains unproven and is denied by the installed wrapper.
+    const emptySessionControllerTool = controllerFactory({
+      agentId: "main",
+      sessionKey: SMOKE_OWNER_CANONICAL_SESSION,
+      sessionId: "",
+      senderIsOwner: true,
+    }) as Parameters<typeof agentHarness.wrapToolWithBeforeToolCallHook>[0];
+    const emptySessionTool = agentHarness.wrapToolWithBeforeToolCallHook(
+      emptySessionControllerTool,
+      {
+        ...ownerRunContext,
+        sessionId: "",
+        runId: SMOKE_OWNER_EMPTY_RUN_ID,
+        requester: { channel: "discord", senderIsOwner: true },
+      },
+    );
+    const emptySessionResult = await emptySessionTool.execute(
+      "smoke-owner-empty-session", {
+        action: "status",
+        leaseToken: ownerRegistration.leaseToken,
+      });
+    assert.deepEqual(emptySessionResult.details, { status: "prepared" });
+    const oneSidedSessionTool = agentHarness.wrapToolWithBeforeToolCallHook(
+      emptySessionControllerTool,
+      {
+        ...ownerRunContext,
+        runId: SMOKE_OWNER_EMPTY_RUN_ID,
+        requester: { channel: "discord", senderIsOwner: true },
+      },
+    );
+    const oneSidedSessionResult = await oneSidedSessionTool.execute(
+      "smoke-owner-one-sided-session", {
+        action: "status",
+        leaseToken: ownerRegistration.leaseToken,
+      });
+    assert.deepEqual(oneSidedSessionResult.details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+
     await controllerRunner.runAgentEnd({
       runId: ownerRunContext.runId,
       messages: [],
@@ -691,7 +790,7 @@ async function main(): Promise<void> {
       { status: "error", code: ReasonCodes.ControllerCallerInvalid },
       "the installed agent_end path must revoke bridged owner authority");
     hookRuntime.resetGlobalHookRunner();
-    record("installed hook and harness tool runtimes bridge and revoke direct-owner controller authority");
+    record("installed hook and harness tool runtimes preserve canonical direct-owner recovery, reject projected/partial identities, and revoke bridged authority");
 
     const automationTemplate = JSON.parse(readFileSync(path.join(PLUGIN_ROOT,
       "templates", "report-controller-automation.json"), "utf8")) as Record<string, unknown>;
