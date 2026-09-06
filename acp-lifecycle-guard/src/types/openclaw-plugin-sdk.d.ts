@@ -5,7 +5,7 @@
  * `openclaw` is a peer dependency, not a build dependency: the guard must stay
  * installable and testable without pulling the whole host package into CI. The
  * shape below mirrors `definePluginEntry` from
- * `openclaw/plugin-sdk/plugin-entry` in `openclaw@2026.7.1-2`.
+ * `openclaw/plugin-sdk/plugin-entry` in `openclaw@2026.8.1`.
  *
  * The plugin never imports the deprecated root barrel (`openclaw/plugin-sdk`).
  */

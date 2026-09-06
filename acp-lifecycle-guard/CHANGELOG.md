@@ -4,21 +4,36 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-09-06
+
+- Make host-proven owner-run admission initialization and revocation atomic
+  across hook registration, and keep authorization diagnostics content-free.
+- Keep the in-memory lease fence aligned with the registry document when a
+  persistence error occurs after the atomic rename commit point; only a
+  pre-rename failure rolls the mutation back.
+- Document OpenClaw's sender-authority steering fingerprint accurately: an
+  authority-mismatched follow-up queues into another run and cannot inherit the
+  admitted owner's controller authority.
+
 ## [0.6.2] - 2026-09-05
 
 - Preserve a host-proven direct-owner admission across requester-less bridged
   tool hooks by binding it to the exact `main` agent, session, and run and
   revoking it at `agent_end`; an explicit non-owner tool context still fails
-  closed.
-- Recover byte-identical prepared registrations from a fresh authenticated run
-  in the same owner session and transfer the lifecycle completion fence to that
-  recovery run.
+  closed. The `before_agent_run` handler fails open on the host's fail-closed
+  gate, `agent_end` also discards tool admissions the run never executed, and
+  bounded-cap eviction logs one content-free `owner_run_evicted` line.
+- Recover byte-identical prepared registrations from another authenticated
+  `main` run in the same owner session and transfer the lifecycle completion
+  fence to that recovery run; a recovering run that already holds a lease is
+  refused, and a transfer logs one content-free `fence_transferred` line.
 - Exercise controller registration and revocation through the installed
   OpenClaw hook, harness tool-dispatch wrapper, and trusted-tool-policy runtime
   so requester-bridge drift cannot hide behind direct executor calls.
 - Poll the controller every 60 seconds while retaining the transport-owned
   600-second report cadence, preventing phase offset from delaying a due or
-  terminal report for nearly another full cadence.
+  terminal report for nearly another full cadence. An expired uncertain attempt
+  is therefore reclaimed on the next poll rather than the next cadence.
 
 ## [0.6.1] - 2026-09-04
 

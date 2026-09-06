@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 
 import { createControllerSurfaces } from "../src/controller/surfaces.ts";
 import {
+  MAX_OWNER_RUN_ADMISSIONS,
+  OwnerRunAdmissions,
+  resolveOwnerAuthority,
+} from "../src/controller/owner-runs.ts";
+import {
   LeaseRegistry,
   MAX_PREPARED_LEASES_PER_OWNER,
   ReportController,
@@ -16,6 +21,7 @@ import {
   type ActiveLease,
 } from "../src/controller/registry.ts";
 import type {
+  BeforeAgentRunEvent,
   BeforeToolCallEvent,
   BeforeToolCallResult,
   GuardHostApi,
@@ -133,6 +139,46 @@ async function activate(registry: LeaseRegistry, entry: ActiveLease): Promise<Ac
   return entry;
 }
 
+type PolicySurface = {
+  evaluate: (event: BeforeToolCallEvent, ctx: ToolHookContext) => BeforeToolCallResult | void;
+};
+type ToolSurface = { execute: (id: string, params: unknown) => Promise<Record<string, unknown>> };
+
+/** One fake host per test: captures the policy, the tool factory, and every warn line. */
+function surfacesHarness(f: ReturnType<typeof fixture>): {
+  surfaces: ReturnType<typeof createControllerSurfaces>;
+  policy: PolicySurface;
+  toolFactory: (ctx: PluginToolContext) => ToolSurface;
+  logs: string[];
+} {
+  const logs: string[] = [];
+  let policy: PolicySurface | undefined;
+  let toolFactory: ((ctx: PluginToolContext) => ToolSurface) | undefined;
+  const api = {
+    id: "acp-lifecycle-guard",
+    logger: { warn: (line: unknown) => logs.push(String(line)) },
+    runtime: { state: { resolveStateDir: () => f.state } },
+    on: () => {},
+    registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
+    registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
+  } as unknown as GuardHostApi;
+  const surfaces = createControllerSurfaces(api);
+  return { surfaces, policy: policy!, toolFactory: toolFactory!, logs };
+}
+
+function registrationParams(f: ReturnType<typeof fixture>): Record<string, unknown> {
+  return {
+    action: "register",
+    leaseToken: "lease-token-example-00000001",
+    transportFile: f.transport,
+    processHandle: "process-example-1",
+    jobId: "job-example-1",
+    destination: { channel: "discord", accountId: "account-example", conversationId: "1" },
+    reportPumpEntry: f.pump,
+    hostTransportEntry: f.host,
+  };
+}
+
 async function preparePublication(
   controller: ReportController,
   entry: ActiveLease,
@@ -191,6 +237,30 @@ describe("owner-private persistent lease registry", () => {
     assert.equal(document.leases.length, 1);
     assert.equal(document.leases[0]?.ownerRunId, "owner-run-example-recovery");
 
+    // A failed durable write never moves the fence in memory only.
+    const persistInternals = recoveredRegistry as unknown as { persist: () => void };
+    const realPersist = persistInternals.persist.bind(recoveredRegistry);
+    persistInternals.persist = () => { throw new Error("synthetic persistence failure"); };
+    assert.throws(() => register(recoveredRegistry, f, { ownerRunId: "owner-run-example-4" }),
+      /synthetic persistence failure/u);
+    persistInternals.persist = realPersist;
+    assert.equal(recoveredRegistry.getByToken("lease-token-example-00000001")?.ownerRunId,
+      "owner-run-example-recovery");
+    assert.equal(fs.readFileSync(recoveredRegistry.file, "utf8"), persistedAfterRecovery);
+
+    // A run that already holds a lease cannot absorb another one by replay:
+    // the one-lease-per-owner-run rule applies to transfers too.
+    const third = fixture();
+    register(recoveredRegistry, third, {
+      leaseToken: "lease-token-example-00000003", ownerRunId: "owner-run-example-3", jobId: "job-example-3",
+    });
+    assert.throws(() => register(recoveredRegistry, f, { ownerRunId: "owner-run-example-3" }),
+      /controller\.duplicate/u);
+    assert.equal(recoveredRegistry.getByToken("lease-token-example-00000001")?.ownerRunId,
+      "owner-run-example-recovery");
+    assert.equal(recoveredRegistry.leasesForOwner("agent:main:discord:example-owner",
+      "owner-run-example-3").length, 1);
+
     const alternate = fixture();
     for (const overrides of [
       { leaseToken: "lease-token-example-00000002" },
@@ -202,6 +272,40 @@ describe("owner-private persistent lease registry", () => {
     ]) {
       assert.throws(() => register(recoveredRegistry, f, overrides), /controller\.duplicate/u);
     }
+  });
+
+  it("keeps memory aligned with disk when persistence fails after atomic rename", () => {
+    const f = fixture();
+    const registry = new LeaseRegistry(f.state);
+    register(registry, f);
+    const persistInternals = registry as unknown as {
+      persist: (markCommitted: () => void) => void;
+    };
+    const realPersist = persistInternals.persist.bind(registry);
+    persistInternals.persist = (markCommitted) => realPersist(() => {
+      markCommitted();
+      throw new Error("synthetic post-rename persistence failure");
+    });
+    assert.throws(() => register(registry, f, {
+      ownerRunId: "owner-run-example-post-rename",
+    }), /synthetic post-rename persistence failure/u);
+    persistInternals.persist = realPersist;
+
+    assert.equal(registry.getByToken("lease-token-example-00000001")?.ownerRunId,
+      "owner-run-example-post-rename");
+    const reloaded = new LeaseRegistry(f.state);
+    assert.equal(reloaded.getByToken("lease-token-example-00000001")?.ownerRunId,
+      "owner-run-example-post-rename");
+  });
+
+  it("never re-binds an active lease to another run", async () => {
+    const f = fixture();
+    const registry = new LeaseRegistry(f.state);
+    const entry = await activate(registry, register(registry, f));
+    assert.throws(() => register(registry, f, { ownerRunId: "owner-run-example-recovery" }),
+      /controller\.duplicate/u);
+    assert.equal(entry.ownerRunId, "owner-run-example-1");
+    assert.equal(registry.leasesForOwner("agent:main:discord:example-owner", "owner-run-example-1").length, 1);
   });
 
   it("rejects mismatched duplicates, symlinks, and insecure private files", () => {
@@ -942,84 +1046,191 @@ describe("receipt time and lifecycle enforcement", () => {
 
 
 describe("host-proven controller owner-run admission", () => {
-  it("bridges the direct-owner run into tool hooks and recovers an exact registration from a fresh run", async () => {
-    const f = fixture();
-    let policy: { evaluate: (event: BeforeToolCallEvent, ctx: ToolHookContext) => BeforeToolCallResult | void } |
-      undefined;
-    let toolFactory: ((ctx: PluginToolContext) => {
-      execute: (id: string, params: unknown) => Promise<Record<string, unknown>> }) | undefined;
-    const api = {
-      id: "acp-lifecycle-guard",
-      logger: {},
-      runtime: { state: { resolveStateDir: () => f.state } },
-      on: () => {},
-      registerTool: (value: unknown) => { toolFactory = value as typeof toolFactory; },
-      registerTrustedToolPolicy: (value: unknown) => { policy = value as typeof policy; },
-    } as unknown as GuardHostApi;
-    const surfaces = createControllerSurfaces(api);
-    const sessionKey = "agent:main:discord:example-owner";
-    const registration = {
-      action: "register",
-      leaseToken: "lease-token-example-00000001",
-      transportFile: f.transport,
-      processHandle: "process-example-1",
-      jobId: "job-example-1",
-      destination: { channel: "discord", accountId: "account-example", conversationId: "1" },
-      reportPumpEntry: f.pump,
-      hostTransportEntry: f.host,
-    };
-    const invoke = async (id: string, runId: string, params: Record<string, unknown>,
-      senderIsOwner?: boolean) => {
+  const sessionKey = "agent:main:discord:example-owner";
+  const leaseToken = "lease-token-example-00000001";
+  const contentFree = (line: string): boolean =>
+    !line.includes("example-owner") && !line.includes("owner-run") && !line.includes("lease-token") &&
+    !line.includes("owner request") && !line.includes("owner recovery");
+
+  function bridgedInvoke(h: ReturnType<typeof surfacesHarness>) {
+    return async (id: string, runId: string, params: Record<string, unknown>, senderIsOwner?: boolean) => {
       const context: ToolHookContext = {
-        toolName: "acp_report_controller",
-        toolCallId: id,
-        agentId: "main",
-        sessionKey,
-        runId,
+        toolName: "acp_report_controller", toolCallId: id, agentId: "main", sessionKey, runId,
         ...(senderIsOwner === undefined ? {} : { requester: { senderIsOwner } }),
       };
-      policy!.evaluate({ toolName: "acp_report_controller", toolCallId: id, params }, context);
-      return toolFactory!({ agentId: "main", sessionKey }).execute(id, params);
+      h.policy.evaluate({ toolName: "acp_report_controller", toolCallId: id, params }, context);
+      return h.toolFactory({ agentId: "main", sessionKey }).execute(id, params);
     };
+  }
 
-    surfaces.beforeAgentRun(
+  it("bridges the direct-owner run into tool hooks and recovers an exact registration from a fresh run", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const invoke = bridgedInvoke(h);
+    const registration = registrationParams(f);
+    const transfers = (): number =>
+      h.logs.filter((line) => line.includes(ReasonCodes.ControllerFenceTransferred)).length;
+
+    assert.deepEqual(h.surfaces.beforeAgentRun(
       { prompt: "owner request", messages: [], senderIsOwner: true },
       { agentId: "main", sessionKey, runId: "owner-run-example-1" },
-    );
+    ), { outcome: "pass" });
     assert.deepEqual((await invoke("explicit-non-owner", "owner-run-example-1", registration, false)).details,
       { status: "error", code: ReasonCodes.ControllerCallerInvalid });
     assert.deepEqual((await invoke("register-1", "owner-run-example-1", registration)).details,
       { status: "prepared" });
-
     assert.deepEqual((await invoke("unadmitted-run", "owner-run-example-untrusted", registration)).details,
       { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    assert.equal(transfers(), 0);
 
-    surfaces.beforeAgentRun(
+    assert.deepEqual(h.surfaces.beforeAgentRun(
       { prompt: "fresh owner recovery", messages: [], senderIsOwner: true },
       { agentId: "main", sessionKey, runId: "owner-run-example-2" },
-    );
+    ), { outcome: "pass" });
     assert.deepEqual((await invoke("register-fresh-run", "owner-run-example-2", registration)).details,
       { status: "prepared" });
-    assert.equal(surfaces.registry.getByToken(registration.leaseToken)?.ownerRunId,
+    assert.equal(h.surfaces.registry.getByToken(leaseToken)?.ownerRunId,
       "owner-run-example-2", "recovery must transfer the lifecycle fence to the fresh owner run");
-    assert.equal(surfaces.beforeAgentFinalize({ sessionId: "example", stopHookActive: false }, {
+    assert.equal(transfers(), 1, "a fence transfer is observable as exactly one content-free line");
+    assert.deepEqual((await invoke("register-fresh-run-replay", "owner-run-example-2", registration)).details,
+      { status: "prepared" });
+    assert.equal(transfers(), 1, "a same-run replay is not a transfer");
+    assert.equal(h.surfaces.beforeAgentFinalize({ sessionId: "example", stopHookActive: false }, {
       agentId: "main", sessionKey, runId: "owner-run-example-2",
     })?.action, "revise");
-    const yieldDecision = policy!.evaluate({
+    assert.deepEqual(h.policy.evaluate({
       toolName: "sessions_yield", toolCallId: "fresh-owner-yield", params: {},
     }, {
       toolName: "sessions_yield", toolCallId: "fresh-owner-yield", agentId: "main",
       sessionKey, runId: "owner-run-example-2",
-    });
-    assert.deepEqual(yieldDecision,
-      { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion });
+    }), { block: true, blockReason: ReasonCodes.LeaseEarlyCompletion });
 
-    surfaces.agentEnd(
+    h.surfaces.agentEnd(
       { runId: "owner-run-example-2", messages: [], success: true },
       { agentId: "main", sessionKey, runId: "owner-run-example-2" },
     );
     assert.deepEqual((await invoke("revoked-run", "owner-run-example-2", {
-      action: "status", leaseToken: registration.leaseToken,
+      action: "status", leaseToken,
     })).details, { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    assert.ok(h.logs.length > 0);
+    assert.ok(h.logs.every(contentFree));
+  });
+
+  it("never admits non-main or identity-less runs, revokes on a later non-owner gate, and never throws on the fail-closed gate", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const invoke = bridgedInvoke(h);
+    const registration = registrationParams(f);
+
+    assert.deepEqual(h.surfaces.beforeAgentRun(undefined as never, undefined as never), { outcome: "pass" });
+    assert.deepEqual(h.surfaces.beforeAgentRun({ prompt: "x", messages: [] }, undefined as never),
+      { outcome: "pass" });
+    assert.deepEqual(h.surfaces.beforeAgentRun(
+      { prompt: "x", messages: [], senderIsOwner: true },
+      { agentId: "other", sessionKey, runId: "owner-run-example-3" },
+    ), { outcome: "pass" });
+    assert.deepEqual((await invoke("non-main-admission", "owner-run-example-3", registration)).details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    assert.deepEqual(h.surfaces.beforeAgentRun(
+      { prompt: "x", messages: [], senderIsOwner: true }, { agentId: "main", sessionKey },
+    ), { outcome: "pass" });
+    assert.deepEqual(h.surfaces.beforeAgentRun(
+      { prompt: "x", messages: [], senderIsOwner: true }, { agentId: "main", runId: "owner-run-example-3" },
+    ), { outcome: "pass" });
+    assert.deepEqual((await invoke("idless-admission", "owner-run-example-3", registration)).details,
+      { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+
+    const laterGates: Array<[string, BeforeAgentRunEvent]> = [
+      ["owner-run-example-4", { prompt: "x", messages: [], senderIsOwner: false }],
+      ["owner-run-example-5", { prompt: "x", messages: [] }],
+    ];
+    for (const [runId, later] of laterGates) {
+      h.surfaces.beforeAgentRun({ prompt: "x", messages: [], senderIsOwner: true },
+        { agentId: "main", sessionKey, runId });
+      h.surfaces.beforeAgentRun(later, { agentId: "main", sessionKey, runId });
+      assert.deepEqual((await invoke(`revoked-${runId}`, runId, registration)).details,
+        { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    }
+    assert.equal(h.surfaces.registry.getByToken(leaseToken), undefined);
+    assert.ok(h.logs.every(contentFree));
+  });
+
+  it("does not honor a tool admission computed before the run ended", async () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    const registration = registrationParams(f);
+    h.surfaces.beforeAgentRun({ prompt: "x", messages: [], senderIsOwner: true },
+      { agentId: "main", sessionKey, runId: "owner-run-example-6" });
+    h.policy.evaluate({ toolName: "acp_report_controller", toolCallId: "pre-end-call", params: registration }, {
+      toolName: "acp_report_controller", toolCallId: "pre-end-call", agentId: "main", sessionKey,
+      runId: "owner-run-example-6",
+    });
+    h.surfaces.agentEnd({ runId: "owner-run-example-6", messages: [], success: true },
+      { agentId: "main", sessionKey, runId: "owner-run-example-6" });
+    assert.deepEqual((await h.toolFactory({ agentId: "main", sessionKey }).execute("pre-end-call", registration))
+      .details, { status: "error", code: ReasonCodes.ControllerCallerInvalid });
+    assert.equal(h.surfaces.registry.getByToken(leaseToken), undefined);
+    assert.ok(h.logs.every(contentFree));
+  });
+
+  it("reports bounded-state eviction with exactly one content-free line", () => {
+    const f = fixture();
+    const h = surfacesHarness(f);
+    for (let index = 0; index <= MAX_OWNER_RUN_ADMISSIONS; index += 1) {
+      h.surfaces.beforeAgentRun({ prompt: "x", messages: [], senderIsOwner: true },
+        { agentId: "main", sessionKey, runId: `owner-run-example-${index}` });
+    }
+    const evictions = h.logs.filter((line) => line.includes(ReasonCodes.ControllerOwnerRunEvicted));
+    assert.equal(evictions.length, 1);
+    assert.match(evictions[0]!,
+      /^\[acp-lifecycle-guard\] hook=before_agent_run outcome=evicted kind=controller reason=acp_lifecycle_guard\.controller\.owner_run_evicted$/u);
+    assert.ok(h.logs.every(contentFree));
+  });
+});
+
+describe("owner-run admissions", () => {
+  const sessionKey = "agent:main:discord:example-owner";
+
+  it("remembers exact session/run pairs and revokes on any identity the host still provides", () => {
+    const admissions = new OwnerRunAdmissions();
+    assert.equal(admissions.admit(sessionKey, "owner-run-example-1"), false);
+    assert.equal(admissions.has(sessionKey, "owner-run-example-1"), true);
+    assert.equal(admissions.has(sessionKey, "owner-run-example-2"), false);
+    assert.equal(admissions.has("agent:main:discord:example-other", "owner-run-example-1"), false);
+    assert.equal(admissions.admit(sessionKey, "owner-run-example-1"), false, "re-admission is idempotent");
+    assert.equal(admissions.size, 1);
+    for (const [key, runId] of [["", "run"], [sessionKey, ""], [undefined, "run"], [sessionKey, 7], [null, null]]) {
+      assert.equal(admissions.admit(key, runId), false);
+      assert.equal(admissions.has(key, runId), false);
+    }
+    assert.equal(admissions.size, 1);
+    admissions.revoke(sessionKey, "owner-run-example-1");
+    assert.equal(admissions.has(sessionKey, "owner-run-example-1"), false);
+    assert.equal(admissions.size, 0);
+  });
+
+  it("evicts only the oldest admission, only past the cap, and reports it", () => {
+    const admissions = new OwnerRunAdmissions();
+    for (let index = 0; index < MAX_OWNER_RUN_ADMISSIONS; index += 1) {
+      assert.equal(admissions.admit(sessionKey, `owner-run-example-${index}`), false);
+    }
+    assert.equal(admissions.size, MAX_OWNER_RUN_ADMISSIONS);
+    assert.equal(admissions.admit(sessionKey, "owner-run-example-0"), false,
+      "re-admitting a tracked run at capacity evicts nothing");
+    assert.equal(admissions.admit(sessionKey, "owner-run-example-overflow"), true);
+    assert.equal(admissions.size, MAX_OWNER_RUN_ADMISSIONS);
+    assert.equal(admissions.has(sessionKey, "owner-run-example-0"), false);
+    assert.equal(admissions.has(sessionKey, "owner-run-example-1"), true);
+    assert.equal(admissions.has(sessionKey, "owner-run-example-overflow"), true);
+  });
+
+  it("lets an explicit host verdict win in both directions and fails closed on anything else", () => {
+    assert.equal(resolveOwnerAuthority(true, false), true);
+    assert.equal(resolveOwnerAuthority(false, true), false);
+    assert.equal(resolveOwnerAuthority(undefined, true), true);
+    assert.equal(resolveOwnerAuthority(undefined, false), false);
+    assert.equal(resolveOwnerAuthority(null, true), false);
+    assert.equal(resolveOwnerAuthority("true", true), false);
+    assert.equal(resolveOwnerAuthority(1, true), false);
   });
 });

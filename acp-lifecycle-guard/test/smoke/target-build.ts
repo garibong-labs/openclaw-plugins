@@ -101,7 +101,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -615,7 +614,6 @@ async function main(): Promise<void> {
     writeFileSync(ownerTransport, "{}\n", { mode: 0o600 });
     writeFileSync(ownerPump, "export {};\n", { mode: 0o600 });
     writeFileSync(ownerHost, "export {};\n", { mode: 0o600 });
-    chmodSync(ownerCodeDir, 0o700);
     const controllerRunner = initRunner(defaultRegistration.typedHooks, [PLUGIN_ID], [{
       pluginId: PLUGIN_ID,
       pluginName: "ACP Lifecycle Guard",
