@@ -4,6 +4,29 @@ All notable changes to `openclaw-acp-lifecycle-guard` are documented here. This
 plugin is versioned independently of the repository and follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-09-06
+
+- Reconcile OpenClaw 2026.8.1's canonical run session key with its projected
+  sandbox/runtime tool session key only when two concrete `main` keys carry the
+  exact shared ephemeral session id and run id. Normalize empty optional ids to
+  absence, reject one-sided ids for authorization, and use the same projection
+  relation for owner-run lookup, tool execution, and revocation.
+- Preserve direct trusted-requester recovery only when its policy key is the
+  canonical `agent:main:<requester-channel>:...` key; a projected policy key
+  without a `before_agent_run` admission cannot become the durable lease owner.
+- Keep explicit non-owner verdicts authoritative, reject cross-session and
+  cross-run transfers, and revoke projected-key admissions at `agent_end`.
+- Accept OpenClaw 2026.8.1's exact `cron:<jobId>:trigger` script-runtime session
+  while continuing to reject every unrecognized suffix, and cover tick plus
+  one-shot message injection on that production shape.
+- Resolve early-completion policy checks through the exact owner-run admission;
+  when a projected alias is missing or mismatched, the exact host run id can
+  conservatively block completion but can never grant controller authority.
+- Require an empty controller registry for `0.6.3` → `0.6.4` upgrades: legacy
+  projected-key leases do not contain durable session-id proof and are not
+  silently migrated. Pin the existing plugin-info fields used by runtime
+  preflight without adding another API.
+
 ## [0.6.3] - 2026-09-06
 
 - Make host-proven owner-run admission initialization and revocation atomic

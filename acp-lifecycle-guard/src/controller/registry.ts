@@ -457,6 +457,12 @@ export class LeaseRegistry {
       entry.ownerSessionKey === sessionKey && entry.ownerRunId === runId);
   }
 
+  /** Conservative completion fence when a projected owner key cannot be resolved. */
+  leasesForOwnerRun(runId: string | undefined): ControllerLease[] {
+    if (!runId) return [];
+    return [...this.entries.values()].filter((entry) => entry.ownerRunId === runId);
+  }
+
   leasesForCron(agentId: string | undefined, sessionKey: string | undefined): ControllerLease[] {
     const jobId = exactCronJob(sessionKey);
     if (agentId !== "main" || jobId === undefined) return [];
@@ -579,7 +585,7 @@ export type ControllerTickResult =
 
 function exactCronJob(sessionKey: string | undefined): string | undefined {
   if (!sessionKey) return undefined;
-  const match = /^(?:agent:main:)?cron:([^:]+)(?::run:[^:]+)?$/u.exec(sessionKey);
+  const match = /^(?:agent:main:)?cron:([^:]+)(?::(?:trigger|run:[^:]+))?$/u.exec(sessionKey);
   return match?.[1];
 }
 
